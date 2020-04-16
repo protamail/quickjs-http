@@ -1,0 +1,4 @@
+#!/home/op/bin/qjs -m
+import * as os from 'os';
+os.exec(["/bin/sh", "-c", "top -c -p $(pgrep -d',' -f qjs)"]);
+
