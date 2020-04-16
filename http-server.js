@@ -1,9 +1,9 @@
-import * as util from "./httputil.so";
+import * as util from "./lib/httputil.so";
 import * as os from "os";
 import * as std from "std";
 import { see } from "./see.js";
 export * from "./see.js";
-export * from "./httputil.so";
+export * from "./lib/httputil.so";
 
 const MAX_REQUEST_SIZE = 20000000;
 var _buf = new ArrayBuffer(4);

@@ -7,7 +7,7 @@ CFLAGS += -Wno-array-bounds -Wno-format-truncation
 AR=gcc-ar
 STRIP=strip
 LDFLAGS=-g
-SHLIB=httputil.so
+SHLIB=lib/httputil.so
 
 PROGS=$(SHLIB)
 
