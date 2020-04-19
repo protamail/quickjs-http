@@ -186,18 +186,13 @@ function httpWorker() {
 //                console.log(see(r));
                 let resp = {
                     //status: 403, //let backup backend handle it
+                    httpMinor: r.httpMinor,
                     status: 200,
-                    body: util.toArrayBuffer("OK"),
                     h: {
                         "Host": "localhost",
                     }
                 };
-                resp.h["Content-Length"] = resp.body.byteLength;
-                let h = [`HTTP/1.${r.httpMinor} ${resp.status}\r\n`];
-                for (let k in resp.h)
-                    h.push(`${k}: ${resp.h[k]}\r\n`)
-                h.push("\r\n");
-                util.send(connfd, h.join(""), resp.body);
+                util.sendHttpResponse(connfd, resp, "OK");
                 if (r.httpMinor != "1")
                     break; //no keep-alive for v1.0
             }

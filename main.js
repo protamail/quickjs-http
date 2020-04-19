@@ -16,7 +16,7 @@ try {
     server.shutdown(); //shutdown workers
 }
 
-server.forkRun(function() {
+/*server.forkRun(function() {
 try {
     for(let i=0;i<100000;i++) {
         var conn = server.connect("127.0.0.1", "1202");
@@ -33,5 +33,5 @@ try {
 }
     //console.log(server.see(resp));
 });
-
+*/
 
