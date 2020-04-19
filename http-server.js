@@ -4,6 +4,7 @@ import * as std from "std";
 import { see } from "./see.js";
 export * from "./see.js";
 export * from "./lib/httputil.so";
+export { close } from "os";
 
 const MAX_REQUEST_SIZE = 20000000;
 var _buf = new ArrayBuffer(4);
@@ -11,6 +12,10 @@ var _intBuf = new Uint32Array(_buf);
 var _workers = {};
 var _listenfd, _minWorkers, _maxWorkers, _timeoutSec;
 var _workerProcess = 0, _statusWriteFd, _procLimitTimer;
+
+os.signal(os.SIGPIPE, function() {
+    console.log(`Received SIGPIPE`);
+});
 
 os.signal(os.SIGCHLD, function() {
     let pid;
@@ -28,8 +33,7 @@ os.signal(os.SIGCHLD, function() {
 const termSignals = [os.SIGQUIT, os.SIGTERM, os.SIGINT];
 termSignals.forEach(s => os.signal(s, function collectWorkers() {
     console.log(`Received signal ${s}`);
-    stop();
-    std.exit(0);
+    shutdown();
 }));
 
 export function start({ listen, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180 }) {
@@ -52,10 +56,22 @@ function scheduleProcLimiter() {
     }, 2000);
 }
 
-export function stop() {
+function initChild() {
+    for (let workerKey in _workers) {
+        os.setReadHandler(_workers[workerKey].statusReadFd, null);
+        os.close(_workers[workerKey].statusReadFd);
+        delete _workers[workerKey];
+    }
+    if (_procLimitTimer)
+        os.clearTimeout(_procLimitTimer);
+    [os.SIGCHLD, ...termSignals].forEach(s => os.signal(s, null));
+}
+
+export function shutdown() {
     console.log("Shutting down.");
     for (let workerKey in _workers)
         os.kill(_workers[workerKey].pid, os.SIGINT);
+    std.exit(0);
 }
 
 function enforceWorkerLimits() { //only parent process should return from here
@@ -125,29 +141,75 @@ function newWorker() {
         });
     } else { //0=child
         _workerProcess = 1;
-        os.close(statusReadFd);
-        [os.SIGCHLD, ...termSignals].forEach(s => os.signal(s, null));
-        httpWorker();
-        std.exit(0); //only parent process should return from here
+        try {
+            initChild();
+            os.close(statusReadFd);
+            httpWorker();
+        } catch (e) {
+            console.log(e);
+            console.log(e?.stack);
+        } finally {
+            std.exit(0); //child is complete
+        }
+    }
+}
+
+export function forkRun(func) {
+    let pid = util.fork();
+
+    if (pid < 0)
+        throw new Error("Failed to fork a process");
+    if (pid == 0) { //child
+        try {
+            initChild();
+            func();
+        } catch (e) {
+            console.log(e);
+            console.log(e?.stack);
+        } finally {
+            std.exit(0); //child is complete
+        }
     }
 }
 
 function httpWorker() {
     let connfd, remoteAddr, remotePort;
-    while(1) {
+    let cc=0;
+    while(1) { //accept loop
         try {
             [connfd, remoteAddr, remotePort] = util.accept(_listenfd);
             signalStatus(1); //busy
-            util.readHttpRequest(connfd, MAX_REQUEST_SIZE);
-            //console.log(see(util.readHttpRequest(connfd, MAX_REQUEST_SIZE)));
-            util.write(connfd, "HTTP/1.1 200\n\nOK");
+            while(1) { //keep-alive loop
+                let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
+                if (!r.method || r.httpMajor != "1") //maybe conn closed or keep-alive limit reached
+                    break;
+//                console.log(see(r));
+                let resp = {
+                    //status: 403, //let backup backend handle it
+                    status: 200,
+                    body: util.toArrayBuffer("OK"),
+                    h: {
+                        "Host": "localhost",
+                    }
+                };
+                resp.h["Content-Length"] = resp.body.byteLength;
+                let h = [`HTTP/1.${r.httpMinor} ${resp.status}\r\n`];
+                for (let k in resp.h)
+                    h.push(`${k}: ${resp.h[k]}\r\n`)
+                h.push("\r\n");
+                util.send(connfd, h.join(""), resp.body);
+                if (r.httpMinor != "1")
+                    break; //no keep-alive for v1.0
+            }
         } catch(e) {
             console.log(e);
-            console.log(e.stack);
+            console.log(e?.stack);
         }
-        if (connfd)
-            os.close(connfd);
-        signalStatus(0); //idle
+        finally {
+            if (connfd)
+                os.close(connfd);
+            signalStatus(0); //idle
+        }
     }
 
     function signalStatus(s) {

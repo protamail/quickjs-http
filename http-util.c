@@ -32,39 +32,44 @@ static JSValue js_fork(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, pid);
 }
 
+static void js_array_buffer_free(JSRuntime *rt, void *opaque, void *ptr)
+{
+    js_free_rt(rt, ptr);
+}
+
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t sockfd, ret, port, backlog = 10;
-    if (argc < 2) {
-        JS_ThrowInternalError(ctx, "Expecting ip_str, port_number, backlog_number=10(optional)");
-        goto fail;
-    }
+    if (argc < 2)
+        goto arg_fail;
     sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
     if (sockfd < 0)
-        goto throw_errno;
+        goto errno_fail;
     ret = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &ret, sizeof(ret)) < 0)
-        goto throw_errno;
+        goto errno_fail;
     if (JS_ToInt32(ctx, &port, argv[1]))
-        goto fail;
+        goto arg_fail;
     if (argc > 2 && JS_ToInt32(ctx, &backlog, argv[2]))
-        goto fail;
+        goto arg_fail;
     struct sockaddr_in addr = { AF_INET, htons(port) };
     const char *str = JS_ToCString(ctx, argv[0]);
     ret = inet_aton(str, &addr.sin_addr);
     JS_FreeCString(ctx, str);
     if (!ret) {
-        JS_ThrowInternalError(ctx, "Specified IP address is not valid");
+        JS_ThrowInternalError(ctx, "Not valid IP address");
         goto fail;
     }
     if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
-        goto throw_errno;
+        goto errno_fail;
     if (listen(sockfd, backlog))
-        goto throw_errno;
+        goto errno_fail;
     return JS_NewInt32(ctx, sockfd);
-throw_errno:
-    JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+errno_fail:
+    return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+arg_fail:
+    return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number, backlog_number=10(optional)");
 fail:
     return JS_EXCEPTION;
 }
@@ -93,7 +98,7 @@ static JSValue js_accept(JSContext *ctx, JSValueConst this_val,
 
 typedef struct http_request {
     JSContext *ctx;
-    int32_t max_request_size;
+    int32_t max_size;
     size_t request_bytes_read;
     int request_complete;
     char *buf;
@@ -187,8 +192,8 @@ static int set_body(http_parser *p)
         return -1;
     r->request_complete = 1;
     if (r->body_len) {
-        JSValue obj = JS_NewArrayBuffer(r->ctx, (uint8_t *)r->buf, r->body_len, NULL, NULL, 0); //takes ownership of buf
-        r->buf = NULL;
+        JSValue obj = JS_NewArrayBuffer(r->ctx, (uint8_t *)r->buf, r->body_len, js_array_buffer_free, NULL, 0);
+        r->buf = NULL; //don't free
         r->body_len = 0;
         if (JS_IsException(obj))
             return -1;
@@ -217,7 +222,7 @@ static int on_url(http_parser *p, const char *at, size_t len)
     return 0;
 }
 
-static JSValue js_read_http_request(JSContext *ctx, JSValueConst this_val,
+static JSValue js_recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t max_header_size, fd, c;
@@ -234,12 +239,12 @@ static JSValue js_read_http_request(JSContext *ctx, JSValueConst this_val,
     if (!rcvbuf || !r.buf) //js_malloc throws out-of-memory
         goto fail;
     if (argc < 2) {
-        JS_ThrowInternalError(ctx, "Expecting sockfd, max_request_size");
+        JS_ThrowInternalError(ctx, "Expecting sockfd, max_size");
         goto fail;
     }
     if (JS_ToInt32(ctx, &fd, argv[0]))
         goto fail;
-    if (JS_ToInt32(ctx, &r.max_request_size, argv[1]))
+    if (JS_ToInt32(ctx, &r.max_size, argv[1]))
         goto fail;
     r.ret = JS_NewObject(ctx);
     r.js_headers = JS_NewObject(ctx);
@@ -257,13 +262,13 @@ static JSValue js_read_http_request(JSContext *ctx, JSValueConst this_val,
     settings.on_headers_complete = set_header;
     settings.on_body = on_body;
     settings.on_message_complete = set_body;
-    http_parser_init(&parser, HTTP_REQUEST);
+    http_parser_init(&parser, parser_type);
     parser.data = &r;
 
-    while (!r.request_complete && (c = read(fd, rcvbuf, BUF_SIZE)) >= 0) {
+    while (!r.request_complete && (c = recv(fd, rcvbuf, BUF_SIZE, 0)) >= 0) {
         r.request_bytes_read += c;
-        if (r.request_bytes_read > r.max_request_size) {
-            JS_ThrowInternalError(ctx, "Request too large, over %d", r.max_request_size);
+        if (r.request_bytes_read > r.max_size) {
+            JS_ThrowInternalError(ctx, "Request too large, over %d", r.max_size);
             goto fail;
         }
         size_t count = http_parser_execute(&parser, &settings, rcvbuf, c);
@@ -283,48 +288,109 @@ static JSValue js_read_http_request(JSContext *ctx, JSValueConst this_val,
     }
     if (parser.http_errno != HPE_OK)
         goto throw_parser_error;
-    goto ret;
-throw_parser_error:
-    JS_ThrowInternalError(ctx, "%s -> %s", http_errno_name(parser.http_errno),
-            http_errno_description(parser.http_errno));
-fail:
-    if (!JS_IsUndefined(r.ret))
-        JS_FreeValue(ctx, r.ret); // js_headers reference is included here
-    r.ret = JS_EXCEPTION;
 ret:
     if (rcvbuf)
         js_free(ctx, rcvbuf);
     if (r.buf)
         js_free(ctx, r.buf);
     return r.ret;
+throw_parser_error:
+    JS_ThrowInternalError(ctx, "%s -> %s", http_errno_name(parser.http_errno),
+            http_errno_description(parser.http_errno));
+fail:
+    JS_FreeValue(ctx, r.ret); // js_headers reference is included here
+    r.ret = JS_EXCEPTION;
+    goto ret;
 }
 
-static JSValue js_write(JSContext *ctx, JSValueConst this_val,
+static JSValue js_send(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t fd, c = 0;
-    size_t len;
-    const char *buf;
-    if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0])) {
-        JS_ThrowInternalError(ctx, "Expecting sockfd, stringOrArrayBuffer, ...");
-        goto fail;
+    size_t slen, alen;
+    const char *sbuf, *abuf = NULL;
+    if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]))
+        goto arg_fail;
+    if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) { //check buffer valid before any send
+        if (!(abuf = (char *)JS_GetArrayBuffer(ctx, &alen, argv[2]))) {
+            JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception if its not, discard
+            goto arg_fail;
+        }
     }
-    for (int i = 1; i < argc; i++) {
-        if ((buf = (char *)JS_GetArrayBuffer(ctx, &len, argv[i])))
-            c = write(fd, buf, len);
-        else {
-            JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception
-            if ((buf = JS_ToCStringLen(ctx, &len, argv[i]))) {
-                c = write(fd, buf, len);
-                JS_FreeCString(ctx, buf);
-            }
-        }
-        if (c != len) {
-            JS_ThrowInternalError(ctx, "Error writing to socket");
-            goto fail;
-        }
+    if (!JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) && (sbuf = JS_ToCStringLen(ctx, &slen, argv[1]))) {
+        c = send(fd, sbuf, slen, argc > 2? MSG_MORE|MSG_NOSIGNAL : MSG_NOSIGNAL); //MSG_MORE important! or big slowdown);
+        JS_FreeCString(ctx, sbuf);
+        if (c != slen)
+            goto send_fail;
+    }
+    if (argc > 2 && abuf) {
+        c = send(fd, abuf, alen, MSG_NOSIGNAL);
+        if (c != alen)
+            goto send_fail;
     }
     return JS_UNDEFINED;
+send_fail:
+    if (c < 0)
+        return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+    else
+        return JS_ThrowInternalError(ctx, "Send failed");
+arg_fail:
+    return JS_ThrowInternalError(ctx, "Expecting sockfd, headerString, [bodyArrayBuffer]");
+}
+
+static JSValue js_recv_http_request(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    return js_recv_http(HTTP_REQUEST, ctx, this_val, argc, argv);
+}
+
+static JSValue js_recv_http_response(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    return js_recv_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
+}
+
+static JSValue js_to_array_buffer(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    size_t len;
+    const char *buf;
+    if (argc < 1)
+        return JS_ThrowInternalError(ctx, "Expecting string");
+    if ((buf = JS_ToCStringLen(ctx, &len, argv[0])))
+        //must use JS_FreeCString to free buf, not js_array_buffer_free
+        return JS_NewArrayBuffer(ctx, (uint8_t *)buf, len, /*js_array_buffer_free*/NULL, NULL, 0);
+    instead of JS_FreeCString and copy, redo the send function to set content-length
+    return JS_ThrowInternalError(ctx, "out of memory?");
+}
+
+static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int32_t sockfd, ret, port;
+    if (argc < 2)
+        goto arg_fail;
+    sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
+    if (sockfd < 0)
+        goto errno_fail;
+    ret = 1;
+    if (JS_ToInt32(ctx, &port, argv[1]))
+        goto arg_fail;
+    struct sockaddr_in addr = { AF_INET, htons(port) };
+    const char *str = JS_ToCString(ctx, argv[0]);
+    ret = inet_aton(str, &addr.sin_addr);
+    JS_FreeCString(ctx, str);
+    if (!ret) {
+        JS_ThrowInternalError(ctx, "Not valid IP address");
+        goto fail;
+    }
+    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
+        goto errno_fail;
+    return JS_NewInt32(ctx, sockfd);
+errno_fail:
+    return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+arg_fail:
+    return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number");
 fail:
     return JS_EXCEPTION;
 }
@@ -336,8 +402,11 @@ static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("fork", 0, js_fork),
     JS_CFUNC_DEF("listen", 2, js_listen),
     JS_CFUNC_DEF("accept", 1, js_accept),
-    JS_CFUNC_DEF("readHttpRequest", 2, js_read_http_request),
-    JS_CFUNC_DEF("write", 2, js_write),
+    JS_CFUNC_DEF("recvHttpRequest", 2, js_recv_http_request),
+    JS_CFUNC_DEF("recvHttpResponse", 2, js_recv_http_response),
+    JS_CFUNC_DEF("send", 2, js_send),
+    JS_CFUNC_DEF("toArrayBuffer", 1, js_to_array_buffer),
+    JS_CFUNC_DEF("connect", 2, js_connect),
 };
 
 static int js_serverutil_init(JSContext *ctx, JSModuleDef *m)

@@ -1,4 +1,5 @@
 OBJDIR=.obj
+LIBDIR=lib
 
 CC=gcc
 #-flto 
@@ -20,10 +21,10 @@ LIBS=-lm -ldl -lrt
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
-$(CLSDIR):
-	mkdir -p $(CLSDIR)
+$(LIBDIR):
+	mkdir -p $(LIBDIR)
 
-$(SHLIB): $(OBJDIR) $(LIB_OBJS)
+$(SHLIB): $(OBJDIR) $(LIB_OBJS) $(LIBDIR)
 	$(CC) $(LDFLAGS) -shared -o $@ $(LIB_OBJS) $(LIBS)
 #	$(STRIP) $@
 
