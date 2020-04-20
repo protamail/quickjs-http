@@ -1,4 +1,5 @@
 #include "quickjs-libc.h"
+#include "cutils.h"
 #include "http_parser.h"
 #include <unistd.h>
 #include <string.h>
@@ -327,6 +328,8 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
     JSPropertyEnum *atoms = NULL;
     uint32_t atoms_len;
     char cbuf[20];
+    DynBuf header_buf;
+    dbuf_init(&header_buf);
     if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsObject(argv[1])) {
         JS_ThrowInternalError(ctx, "Expecting sockfd, obj, [body]");
         goto ret_fail;
@@ -364,12 +367,11 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
                 goto send_fail;
         } else {
             if (body_len) {
-                SEND("POST", more_flag);
+                SEND("POST ", more_flag);
             } else {
-                SEND("GET", more_flag);
+                SEND("GET ", more_flag);
             }
         }
-        SEND(" ", more_flag);
         if (url_len != (c = send(fd, url, url_len, more_flag)))
             goto send_fail;
         if (!http_minor) {
@@ -378,11 +380,7 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
             SEND(" HTTP/1.1\r\n", more_flag);
         }
     } else { //response
-        if (!http_minor) {
-            SEND("HTTP/1.0 ", more_flag);
-        } else {
-            SEND("HTTP/1.1 ", more_flag);
-        }
+        dbuf_putstr(&header_buf, http_minor? "HTTP/1.1 " : "HTTP/1.0 ");
         JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "status")));
         if (JS_IsException(ret))
             goto ret_fail;
@@ -390,9 +388,8 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
             JS_ThrowInternalError(ctx, "status property required");
             goto ret_fail;
         }
-        if (slen != (c = send(fd, sbuf, slen, more_flag)))
-            goto send_fail;
-        SEND("\r\n", more_flag);
+        dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
+        dbuf_putstr(&header_buf, "\r\n");
     }
 
     JS_FreeValue(ctx, (h = JS_GetPropertyStr(ctx, obj, "h")));
@@ -408,25 +405,24 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
                 goto ret_fail;
             if (!strcasecmp(sbuf, "content-length"))
                 continue;
-            if (slen != (c = send(fd, sbuf, slen, more_flag)))
-                goto send_fail;
-            SEND(": ", more_flag);
+            dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
+            dbuf_putstr(&header_buf, ": ");
             FREE_CS(sbuf);
             JS_FreeValue(ctx, (ret = JS_GetProperty(ctx, h, atoms[i].atom)));
             if (!(sbuf = JS_ToCStringLen(ctx, &slen, ret)))
                 goto ret_fail;
-            if (slen != (c = send(fd, sbuf, slen, more_flag)))
-                goto send_fail;
-            SEND("\r\n", more_flag);
+            dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
+            dbuf_putstr(&header_buf, "\r\n");
         }
     }
-    SEND("Content-Length: ", more_flag);
+    dbuf_putstr(&header_buf, "Content-Length: ");
     if ((slen = snprintf(cbuf, sizeof(cbuf), "%lu", body_len)) > 0) {
-        if (slen != (c = send(fd, cbuf, slen, more_flag)))
-            goto send_fail;
+        dbuf_put(&header_buf, (uint8_t *)cbuf, slen);
     } else
         goto ret_fail;
-    SEND("\r\n\r\n", body_buf? more_flag : MSG_NOSIGNAL);
+    dbuf_putstr(&header_buf, "\r\n\r\n");
+    if (header_buf.size != (c = send(fd, header_buf.buf, header_buf.size, body_buf? MSG_MORE|MSG_NOSIGNAL : MSG_NOSIGNAL)))
+        goto send_fail;
     if (body_buf && body_len != (c = send(fd, body_buf, body_len, MSG_NOSIGNAL)))
         goto send_fail;
 ret_fail:
@@ -435,6 +431,7 @@ ret_fail:
             JS_FreeAtom(ctx, atoms[i].atom);
         js_free(ctx, atoms);
     }
+    dbuf_free(&header_buf);
     if (sbuf)
         JS_FreeCString(ctx, sbuf);
     if (body_buf)
