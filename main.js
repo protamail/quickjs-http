@@ -8,7 +8,7 @@ try {
         listen: "0.0.0.0:1202",
         minWorkers: 2,
         maxWorkers: 20,
-        workerTimeoutSec: 30,
+        workerTimeoutSec: 600,
     });
 } catch (e) {
     console.log(e);

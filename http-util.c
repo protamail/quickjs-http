@@ -318,7 +318,7 @@ static JSValue js_recv_http_response(JSContext *ctx, JSValueConst this_val,
 static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-#define SEND(s) if ((c = send(fd, s, sizeof(s), more_flag)) != sizeof(s)) goto send_fail
+#define SEND(s, f) if ((c = send(fd, s, sizeof(s) - 1, f)) != sizeof(s) - 1) goto send_fail
 #define FREE_CS(b) if (b) { JS_FreeCString(ctx, b); b = NULL; }
     int32_t fd, c = 0, http_minor = 0, more_flag = MSG_MORE|MSG_NOSIGNAL;
     size_t slen, body_len, url_len;
@@ -364,36 +364,35 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
                 goto send_fail;
         } else {
             if (body_len) {
-                SEND("POST");
+                SEND("POST", more_flag);
             } else {
-                SEND("GET");
+                SEND("GET", more_flag);
             }
         }
-        SEND(" ");
+        SEND(" ", more_flag);
         if (url_len != (c = send(fd, url, url_len, more_flag)))
             goto send_fail;
         if (!http_minor) {
-            SEND(" HTTP/1.0\r\n");
+            SEND(" HTTP/1.0\r\n", more_flag);
         } else {
-            SEND(" HTTP/1.1\r\n");
+            SEND(" HTTP/1.1\r\n", more_flag);
         }
     } else { //response
         if (!http_minor) {
-            SEND("HTTP/1.0 ");
+            SEND("HTTP/1.0 ", more_flag);
         } else {
-            SEND("HTTP/1.1 ");
+            SEND("HTTP/1.1 ", more_flag);
         }
         JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "status")));
         if (JS_IsException(ret))
             goto ret_fail;
-        FREE_CS(sbuf);
         if (JS_IsUndefined(ret) || !(sbuf = JS_ToCStringLen(ctx, &slen, ret))) {
             JS_ThrowInternalError(ctx, "status property required");
             goto ret_fail;
         }
         if (slen != (c = send(fd, sbuf, slen, more_flag)))
             goto send_fail;
-        SEND("\r\n");
+        SEND("\r\n", more_flag);
     }
 
     JS_FreeValue(ctx, (h = JS_GetPropertyStr(ctx, obj, "h")));
@@ -411,36 +410,30 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
                 continue;
             if (slen != (c = send(fd, sbuf, slen, more_flag)))
                 goto send_fail;
-            SEND(": ");
+            SEND(": ", more_flag);
             FREE_CS(sbuf);
             JS_FreeValue(ctx, (ret = JS_GetProperty(ctx, h, atoms[i].atom)));
             if (!(sbuf = JS_ToCStringLen(ctx, &slen, ret)))
                 goto ret_fail;
             if (slen != (c = send(fd, sbuf, slen, more_flag)))
                 goto send_fail;
-            SEND("\r\n");
+            SEND("\r\n", more_flag);
         }
     }
-    if (body_buf) {
-        SEND("Content-Length: ");
-        if ((slen = snprintf(cbuf, sizeof(cbuf), "%lu", body_len)) > 0) {
-            if (slen != (c = send(fd, cbuf, slen, more_flag)))
-                goto send_fail;
-        } else
-            goto ret_fail;
-        SEND("\r\n");
-    }
-
-    SEND("\r\n");
-    if (body_buf && body_len != (c = send(fd, body_buf, body_len, more_flag)))
+    SEND("Content-Length: ", more_flag);
+    if ((slen = snprintf(cbuf, sizeof(cbuf), "%lu", body_len)) > 0) {
+        if (slen != (c = send(fd, cbuf, slen, more_flag)))
+            goto send_fail;
+    } else
+        goto ret_fail;
+    SEND("\r\n\r\n", body_buf? more_flag : MSG_NOSIGNAL);
+    if (body_buf && body_len != (c = send(fd, body_buf, body_len, MSG_NOSIGNAL)))
         goto send_fail;
-    send(fd, body_buf, 0, MSG_NOSIGNAL); //indicate no more data to follow
 ret_fail:
     if (atoms) {
-        for (uint32_t i = 0; i < atoms_len; i++) {
+        for (uint32_t i = 0; i < atoms_len; i++)
             JS_FreeAtom(ctx, atoms[i].atom);
-            js_free(ctx, atoms);
-        }
+        js_free(ctx, atoms);
     }
     if (sbuf)
         JS_FreeCString(ctx, sbuf);

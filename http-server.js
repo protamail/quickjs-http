@@ -187,9 +187,10 @@ function httpWorker() {
                 let resp = {
                     //status: 403, //let backup backend handle it
                     httpMinor: r.httpMinor,
-                    status: 200,
+                    status: "200",
                     h: {
                         "Host": "localhost",
+//                        "Content-Type": "text/plain",
                     }
                 };
                 util.sendHttpResponse(connfd, resp, "OK");
