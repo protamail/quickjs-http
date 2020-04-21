@@ -9,9 +9,6 @@
 #include <arpa/inet.h>
 #include <sys/prctl.h>
 #include <stdlib.h>
-//#include <sys/wait.h>
-//#include <malloc.h>
-//#include <pthread.h>
 
 static JSValue js_set_proc_name(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
@@ -319,9 +316,7 @@ static JSValue js_recv_http_response(JSContext *ctx, JSValueConst this_val,
 static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-#define SEND(s, f) if ((c = send(fd, s, sizeof(s) - 1, f)) != sizeof(s) - 1) goto send_fail
-#define FREE_CS(b) if (b) { JS_FreeCString(ctx, b); b = NULL; }
-    int32_t fd, c = 0, http_minor = 0, more_flag = MSG_MORE|MSG_NOSIGNAL;
+    int32_t fd, c = 0, http_minor = 0;
     size_t slen, body_len, url_len;
     const char *sbuf = NULL, *body_buf = NULL, *url = NULL;
     JSValue ret = JS_UNDEFINED, h, obj;
@@ -330,21 +325,25 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
     char cbuf[20];
     DynBuf header_buf;
     dbuf_init(&header_buf);
+    dbuf_realloc(&header_buf, 2048);
     if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsObject(argv[1])) {
         JS_ThrowInternalError(ctx, "Expecting sockfd, obj, [body]");
         goto ret_fail;
     }
     if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) { //read body if any and get length
-        if (!(body_buf = (char *)JS_GetArrayBuffer(ctx, &body_len, argv[2]))) {
+        body_buf = (char *)JS_GetArrayBuffer(ctx, &body_len, argv[2]);
+        if (!body_buf) {
             JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception if its not, discard
-            if (!(body_buf = JS_ToCStringLen(ctx, &body_len, argv[2]))) {
+            body_buf = JS_ToCStringLen(ctx, &body_len, argv[2]);
+            if (!body_buf) {
                 JS_ThrowInternalError(ctx, "Expecting sockfd, obj, [body]");
                 goto ret_fail;
             }
         }
     }
     obj = argv[1];
-    JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "httpMinor")));
+    ret = JS_GetPropertyStr(ctx, obj, "httpMinor");
+    JS_FreeValue(ctx, ret);
     if (JS_IsException(ret))
         goto ret_fail;
     if (!JS_IsUndefined(ret) && JS_ToInt32(ctx, &http_minor, ret)) {
@@ -352,86 +351,105 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
         goto ret_fail;
     }
     if (parser_type == HTTP_REQUEST) {
-        JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "url")));
+        ret = JS_GetPropertyStr(ctx, obj, "url");
+        JS_FreeValue(ctx, ret);
         if (JS_IsException(ret))
             goto ret_fail;
         if (JS_IsUndefined(ret) || !(url = JS_ToCStringLen(ctx, &url_len, ret))) {
             JS_ThrowInternalError(ctx, "url property required");
             goto ret_fail;
         }
-        JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "method")));
+        ret = JS_GetPropertyStr(ctx, obj, "method");
+        JS_FreeValue(ctx, ret);
         if (JS_IsException(ret))
             goto ret_fail;
         if (!JS_IsUndefined(ret) && (sbuf = JS_ToCStringLen(ctx, &slen, ret))) {
-            if (slen != (c = send(fd, sbuf, slen, more_flag))) //MSG_MORE important! or big slowdown
+            if (dbuf_put(&header_buf, (uint8_t *)sbuf, slen))
                 goto send_fail;
         } else {
-            if (body_len) {
-                SEND("POST ", more_flag);
-            } else {
-                SEND("GET ", more_flag);
-            }
+            if (dbuf_putstr(&header_buf, body_len? "POST " : "GET "))
+                goto send_fail;
         }
-        if (url_len != (c = send(fd, url, url_len, more_flag)))
+        if (dbuf_put(&header_buf, (uint8_t *)url, url_len))
             goto send_fail;
-        if (!http_minor) {
-            SEND(" HTTP/1.0\r\n", more_flag);
-        } else {
-            SEND(" HTTP/1.1\r\n", more_flag);
-        }
+        if (dbuf_put(&header_buf, (uint8_t *)(http_minor? " HTTP/1.1\r\n" : " HTTP/1.0\r\n"), 11))
+            goto send_fail;
     } else { //response
-        dbuf_putstr(&header_buf, http_minor? "HTTP/1.1 " : "HTTP/1.0 ");
-        JS_FreeValue(ctx, (ret = JS_GetPropertyStr(ctx, obj, "status")));
+        if (dbuf_put(&header_buf, (uint8_t *)(http_minor? "HTTP/1.1 " : "HTTP/1.0 "), 9))
+            goto send_fail;
+        ret = JS_GetPropertyStr(ctx, obj, "status");
+        JS_FreeValue(ctx, ret);
         if (JS_IsException(ret))
             goto ret_fail;
         if (JS_IsUndefined(ret) || !(sbuf = JS_ToCStringLen(ctx, &slen, ret))) {
             JS_ThrowInternalError(ctx, "status property required");
             goto ret_fail;
         }
-        dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
-        dbuf_putstr(&header_buf, "\r\n");
+        if (dbuf_put(&header_buf, (uint8_t *)sbuf, slen))
+            goto send_fail;
+        if (dbuf_put(&header_buf, (uint8_t *)"\r\n", 2))
+            goto send_fail;
     }
 
-    JS_FreeValue(ctx, (h = JS_GetPropertyStr(ctx, obj, "h")));
+    h = JS_GetPropertyStr(ctx, obj, "h");
+    JS_FreeValue(ctx, h);
     if (JS_IsException(h))
         goto ret_fail;
     if (!JS_IsUndefined(h)) {
         if (JS_GetOwnPropertyNames(ctx, &atoms, &atoms_len, h, JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY))
             goto ret_fail;
         for (uint32_t i = 0; i < atoms_len; i++) {
-            FREE_CS(sbuf);
-            JS_FreeValue(ctx, (ret = JS_AtomToString(ctx, atoms[i].atom)));
-            if (!(sbuf = JS_ToCStringLen(ctx, &slen, ret)))
-                goto ret_fail;
+            ret = JS_AtomToString(ctx, atoms[i].atom);
+            JS_FreeValue(ctx, ret);
+            if (sbuf)
+                JS_FreeCString(ctx, sbuf);
+            sbuf = JS_ToCStringLen(ctx, &slen, ret);
+            if (!sbuf)
+                goto send_fail;
             if (!strcasecmp(sbuf, "content-length"))
                 continue;
-            dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
-            dbuf_putstr(&header_buf, ": ");
-            FREE_CS(sbuf);
-            JS_FreeValue(ctx, (ret = JS_GetProperty(ctx, h, atoms[i].atom)));
-            if (!(sbuf = JS_ToCStringLen(ctx, &slen, ret)))
-                goto ret_fail;
-            dbuf_put(&header_buf, (uint8_t *)sbuf, slen);
-            dbuf_putstr(&header_buf, "\r\n");
+            if (dbuf_put(&header_buf, (uint8_t *)sbuf, slen))
+                goto send_fail;
+            if (dbuf_put(&header_buf, (uint8_t *)": ", 2))
+                goto send_fail;
+            ret = JS_GetProperty(ctx, h, atoms[i].atom);
+            JS_FreeValue(ctx, ret);
+            if (sbuf)
+                JS_FreeCString(ctx, sbuf);
+            sbuf = JS_ToCStringLen(ctx, &slen, ret);
+            if (!sbuf)
+                goto send_fail;
+            if (dbuf_put(&header_buf, (uint8_t *)sbuf, slen))
+                goto send_fail;
+            if (dbuf_put(&header_buf, (uint8_t *)"\r\n", 2))
+                goto send_fail;
         }
     }
-    dbuf_putstr(&header_buf, "Content-Length: ");
-    if ((slen = snprintf(cbuf, sizeof(cbuf), "%lu", body_len)) > 0) {
-        dbuf_put(&header_buf, (uint8_t *)cbuf, slen);
+    if (dbuf_put(&header_buf, (uint8_t *)"Content-Length: ", 16))
+        goto send_fail;
+    slen = snprintf(cbuf, sizeof(cbuf), "%lu", body_len);
+    if (slen > 0) {
+        if (dbuf_put(&header_buf, (uint8_t *)cbuf, slen))
+            goto send_fail;
     } else
-        goto ret_fail;
-    dbuf_putstr(&header_buf, "\r\n\r\n");
-    if (header_buf.size != (c = send(fd, header_buf.buf, header_buf.size, body_buf? MSG_MORE|MSG_NOSIGNAL : MSG_NOSIGNAL)))
         goto send_fail;
-    if (body_buf && body_len != (c = send(fd, body_buf, body_len, MSG_NOSIGNAL)))
+    if (dbuf_put(&header_buf, (uint8_t *)"\r\n\r\n", 4))
         goto send_fail;
+    c = send(fd, header_buf.buf, header_buf.size, body_buf? MSG_MORE|MSG_NOSIGNAL : MSG_NOSIGNAL);
+    if (c != header_buf.size)
+        goto send_fail;
+    if (body_buf) {
+        c = send(fd, body_buf, body_len, MSG_NOSIGNAL);
+        if (c != body_len)
+            goto send_fail;
+    }
 ret_fail:
+    dbuf_free(&header_buf);
     if (atoms) {
         for (uint32_t i = 0; i < atoms_len; i++)
             JS_FreeAtom(ctx, atoms[i].atom);
         js_free(ctx, atoms);
     }
-    dbuf_free(&header_buf);
     if (sbuf)
         JS_FreeCString(ctx, sbuf);
     if (body_buf)
@@ -473,7 +491,8 @@ static JSValue js_send(JSContext *ctx, JSValueConst this_val,
     if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]))
         goto arg_fail;
     if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) { //check buffer valid before any send
-        if (!(abuf = (char *)JS_GetArrayBuffer(ctx, &alen, argv[2]))) {
+        abuf = (char *)JS_GetArrayBuffer(ctx, &alen, argv[2]);
+        if (!abuf) {
             JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception if its not, discard
             goto arg_fail;
         }
@@ -513,6 +532,30 @@ static JSValue js_to_array_buffer(JSContext *ctx, JSValueConst this_val,
         return ret;
     }
     return JS_ThrowInternalError(ctx, "out of memory?");
+}
+
+static JSValue js_array_buffer_to_string(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    size_t alen;
+    const char *abuf = NULL;
+    JSValue ret;
+    if (argc < 1)
+        goto arg_fail;
+    abuf = (char *)JS_GetArrayBuffer(ctx, &alen, argv[0]);
+    if (!abuf) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        goto arg_fail;
+    }
+    ret = JS_NewStringLen(ctx, abuf, alen);
+    if (JS_IsException(ret))
+        goto ret;
+    JS_DetachArrayBuffer(ctx, argv[0]); //release AB data
+ret:
+    return ret;
+arg_fail:
+    ret = JS_ThrowInternalError(ctx, "Expecting arrayBuffer");
+    goto ret;
 }
 
 static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
@@ -559,6 +602,7 @@ static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("sendHttpResponse", 2, js_send_http_response),
     JS_CFUNC_DEF("send", 2, js_send),
     JS_CFUNC_DEF("toArrayBuffer", 1, js_to_array_buffer),
+    JS_CFUNC_DEF("arrayBufferToString", 1, js_array_buffer_to_string),
     JS_CFUNC_DEF("connect", 2, js_connect),
 };
 

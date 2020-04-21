@@ -30,7 +30,7 @@ os.signal(os.SIGCHLD, function() {
     }
 });
 
-const termSignals = [os.SIGQUIT, os.SIGTERM, os.SIGINT];
+const termSignals = [os.SIGQUIT, os.SIGTERM, os.SIGINT, os.SIGABRT];
 termSignals.forEach(s => os.signal(s, function collectWorkers() {
     console.log(`Received signal ${s}`);
     shutdown();
@@ -187,7 +187,7 @@ function httpWorker() {
                 let resp = {
                     //status: 403, //let backup backend handle it
                     httpMinor: r.httpMinor,
-                    status: "200",
+                    status: 200,
                     h: {
                         "Host": "localhost",
 //                        "Content-Type": "text/plain",
