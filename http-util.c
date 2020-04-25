@@ -220,7 +220,7 @@ static int on_url(http_parser *p, const char *at, size_t len)
     return 0;
 }
 
-static JSValue js_recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
+static JSValue recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t max_header_size, fd, c;
@@ -237,7 +237,7 @@ static JSValue js_recv_http(int parser_type, JSContext *ctx, JSValueConst this_v
     if (!rcvbuf || !r.buf) //js_malloc throws out-of-memory
         goto fail;
     if (argc < 2) {
-        JS_ThrowInternalError(ctx, "Expecting sockfd, max_size");
+        JS_ThrowInternalError(ctx, "Expecting sockfd, max_length_bytes");
         goto fail;
     }
     if (JS_ToInt32(ctx, &fd, argv[0]))
@@ -304,20 +304,20 @@ fail:
 static JSValue js_recv_http_request(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    return js_recv_http(HTTP_REQUEST, ctx, this_val, argc, argv);
+    return recv_http(HTTP_REQUEST, ctx, this_val, argc, argv);
 }
 
 static JSValue js_recv_http_response(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    return js_recv_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
+    return recv_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
 }
 
-static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_val,
+static JSValue send_http(int parser_type, JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t fd, c = 0, http_minor = 0;
-    size_t slen, body_len, url_len;
+    size_t slen, body_len = 0, url_len = 0;
     const char *sbuf = NULL, *body_buf = NULL, *url = NULL;
     JSValue ret = JS_UNDEFINED, h, obj;
     JSPropertyEnum *atoms = NULL;
@@ -327,21 +327,24 @@ static JSValue js_send_http(int parser_type, JSContext *ctx, JSValueConst this_v
     dbuf_init(&header_buf);
     dbuf_realloc(&header_buf, 2048);
     if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsObject(argv[1])) {
-        JS_ThrowInternalError(ctx, "Expecting sockfd, obj, [body]");
+arg_fail:
+        JS_ThrowInternalError(ctx, "Expecting sockfd, { url, method, h, body }");
         goto ret_fail;
     }
-    if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) { //read body if any and get length
-        body_buf = (char *)JS_GetArrayBuffer(ctx, &body_len, argv[2]);
+    obj = argv[1];
+    ret = JS_GetPropertyStr(ctx, obj, "body");
+    JS_FreeValue(ctx, ret);
+    if (JS_IsException(ret))
+        goto ret_fail;
+    if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
+        body_buf = (char *)JS_GetArrayBuffer(ctx, &body_len, ret);
         if (!body_buf) {
             JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception if its not, discard
-            body_buf = JS_ToCStringLen(ctx, &body_len, argv[2]);
-            if (!body_buf) {
-                JS_ThrowInternalError(ctx, "Expecting sockfd, obj, [body]");
-                goto ret_fail;
-            }
+            body_buf = JS_ToCStringLen(ctx, &body_len, ret);
+            if (!body_buf)
+                goto arg_fail;
         }
     }
-    obj = argv[1];
     ret = JS_GetPropertyStr(ctx, obj, "httpMinor");
     JS_FreeValue(ctx, ret);
     if (JS_IsException(ret))
@@ -459,7 +462,7 @@ ret_fail:
     if (JS_IsException(ret))
         return ret;
     ret = JS_GetException(ctx);
-    if (JS_IsException(ret))
+    if (!JS_IsUndefined(ret) && !JS_IsNull(ret))
         return JS_Throw(ctx, ret); //rethrow (takes ownership of ret)
     return JS_UNDEFINED;
 send_fail:
@@ -473,13 +476,13 @@ send_fail:
 static JSValue js_send_http_request(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    return js_send_http(HTTP_REQUEST, ctx, this_val, argc, argv);
+    return send_http(HTTP_REQUEST, ctx, this_val, argc, argv);
 }
 
 static JSValue js_send_http_response(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    return js_send_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
+    return send_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
 }
 
 static JSValue js_send(JSContext *ctx, JSValueConst this_val,

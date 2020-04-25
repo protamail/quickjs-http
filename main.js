@@ -16,11 +16,18 @@ try {
     server.shutdown(); //shutdown workers
 }
 
-/*server.forkRun(function() {
+server.forkRun(function() {
 try {
     for(let i=0;i<100000;i++) {
         var conn = server.connect("127.0.0.1", "1202");
-        server.send(conn, "GET /rmt-alex/fmodel1?year=2020&rmtid=6JRC HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+        var r = {
+            url: "/rmt-alex/fmodel1?year=2020&rmtid=6JRC",
+            body: "OK",
+            h: {
+                Host: "localhost"
+            }
+        };
+        server.sendHttpRequest(conn, r);
         var resp = server.recvHttpResponse(conn, 1000000);
 //        console.log(server.see(resp));
         server.close(conn);
@@ -30,8 +37,8 @@ try {
     console.log("done");
 } catch (e){
     console.log(e);
+    console.log(e?.stack);
 }
     //console.log(server.see(resp));
 });
-*/
 
