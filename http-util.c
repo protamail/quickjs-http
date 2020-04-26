@@ -63,8 +63,9 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
     sockfd = socket(af, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
     if (sockfd < 0)
         goto errno_fail;
-    if (af == AF_INET && connect(sockfd, (struct sockaddr *)&addr4, sizeof(addr4)))
+    if (af == AF_INET && connect(sockfd, (struct sockaddr *)&addr4, sizeof(addr4))) {
         goto errno_fail;
+    }
     if (af == AF_INET6 && connect(sockfd, (struct sockaddr *)&addr6, sizeof(addr6)))
         goto errno_fail;
     return JS_NewInt32(ctx, sockfd);
@@ -633,12 +634,12 @@ static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in
         if (getaddrinfo(name_or_ip, NULL, &hints, &ret))
             return -1;
         for (cur = ret; cur; cur = cur->ai_next) {
-            if (cur->ai_addr->sa_family == AF_INET6) {
-                memcpy(addr6, cur->ai_addr, sizeof(*addr6));
-                addr4->sin_port = port;
-            } else if (cur->ai_addr->sa_family == AF_INET) {
-                addr6->sin6_port = port;
+            if (cur->ai_addr->sa_family == AF_INET) {
                 memcpy(addr4, cur->ai_addr, sizeof(*addr4));
+                addr4->sin_port = port;
+            } else if (cur->ai_addr->sa_family == AF_INET6) {
+                memcpy(addr6, cur->ai_addr, sizeof(*addr6));
+                addr6->sin6_port = port;
             }
         }
         freeaddrinfo(ret);
