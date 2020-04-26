@@ -74,7 +74,7 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
     int32_t sockfd, ret, port, backlog = 10;
     if (argc < 2)
         goto arg_fail;
-    sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
+    sockfd = socket(AF_INET6, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
     if (sockfd < 0)
         goto errno_fail;
     ret = 1;
@@ -84,9 +84,9 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
         goto arg_fail;
     if (argc > 2 && JS_ToInt32(ctx, &backlog, argv[2]))
         goto arg_fail;
-    struct sockaddr_in addr = { AF_INET, htons(port) };
+    struct sockaddr_in6 addr = { AF_INET6, htons(port) };
     const char *str = JS_ToCString(ctx, argv[0]);
-    ret = inet_aton(str, &addr.sin_addr);
+    ret = inet_pton(AF_INET, str, &addr.sin6_addr);
     JS_FreeCString(ctx, str);
     if (!ret) {
         JS_ThrowInternalError(ctx, "Not valid IP address");
@@ -619,7 +619,7 @@ arg_fail:
     goto ret;
 }
 
-JSValue hostname_to_ip(char *hostname , char *ip)
+/*JSValue hostname_to_ip(char *hostname , char *ip)
 {
 	struct addrinfo hints, *res, *p;
 	int rv;
@@ -653,7 +653,7 @@ JSValue hostname_to_ip(char *hostname , char *ip)
 	
 	freeaddrinfo(res); // all done with this structure
 	return 0;
-}
+}*/
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
