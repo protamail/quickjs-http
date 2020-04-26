@@ -11,7 +11,7 @@ var _buf = new ArrayBuffer(4);
 var _intBuf = new Uint32Array(_buf);
 var _workers = {};
 var _listenfd, _minWorkers, _maxWorkers, _timeoutSec;
-var _workerProcess = 0, _statusWriteFd, _procLimitTimer;
+var _workerProcess = 0, _statusWriteFd, _procLimitTimer, _requestHandler;
 
 os.signal(os.SIGPIPE, function() {
     console.log(`Received SIGPIPE`);
@@ -36,14 +36,20 @@ termSignals.forEach(s => os.signal(s, function collectWorkers() {
     shutdown();
 }));
 
-export function start({ listen, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180 }) {
-    _listenfd = util.listen(...listen.split(/:/), 10/*backlog*/);
-    [_minWorkers, _maxWorkers, _timeoutSec] = [minWorkers, maxWorkers, workerTimeoutSec];
+export function start({ listen = "0.0.0.0", port, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180, requestHandler }) {
+    if (!port)
+        throw new Error("Expecting port as number");
+    _listenfd = util.listen(listen, port, 10/*backlog*/);
+    [_minWorkers, _maxWorkers, _timeoutSec, _requestHandler] = [minWorkers, maxWorkers, workerTimeoutSec, requestHandler];
     if (!Number.isInteger(_minWorkers) || !Number.isInteger(_maxWorkers) ||
-        !Number.isInteger(workerTimeoutSec) || _maxWorkers < _minWorkers || _minWorkers > 100)
-        throw new Error("Invalid config");
+        !Number.isInteger(_timeoutSec))
+        throw new Error("Expecting minWorkers, maxWorkers, timeoutSec as integer");
+    if (_maxWorkers < _minWorkers || _minWorkers > 100)
+        throw new Error("Expecting maxWorkers < minWorkers and minWorkers < 100");
+    if (!_requestHandler || typeof(_requestHandler) !== "function")
+        throw new Error("Expecting requestHandler as function");
     enforceWorkerLimits();
-    console.log(`Now serving at http://${listen}`);
+    console.log(`Now serving at http://${listen}:${port}`);
     if (_procLimitTimer)
         os.clearTimeout(_procLimitTimer);
     scheduleProcLimiter();
@@ -64,7 +70,7 @@ function initChild() {
     }
     if (_procLimitTimer)
         os.clearTimeout(_procLimitTimer);
-    [os.SIGCHLD, ...termSignals].forEach(s => os.signal(s, null));
+    termSignals.forEach(s => os.signal(s, null));
 }
 
 export function shutdown() {
@@ -183,17 +189,22 @@ function httpWorker() {
                 let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
                 if (!r.method || r.httpMajor != "1") //maybe conn closed or keep-alive limit reached
                     break;
-//                console.log(see(r));
-                let resp = {
-                    //status: 403, //let backup backend handle it
-                    httpMinor: r.httpMinor,
-                    status: 200,
-                    h: {
-                        "Host": "localhost",
-//                        "Content-Type": "text/plain",
-                    }
-                };
-                util.sendHttpResponse(connfd, resp, "OK");
+                [r.path, r.query] = r.url && r.url.split("?") || ["", ""];
+                r.originalActionPath = r.path.split("/");
+                r.originalActionPath.shift();
+                r.actionPath = r.originalActionPath;
+                let o = r.p = {};
+                for (let kv of r.query.split("&")) {
+                    let [k, v] = kv.split("=");
+                    o[k] = v && decodeURIComponent(v);
+                }
+                let resp = _requestHandler(r);
+                if (!resp)
+                    resp = { status: 403 }; //let backup backend handle it
+                resp.httpMinor = r.httpMinor;
+                if (!resp.status)
+                    resp.status = 200;
+                util.sendHttpResponse(connfd, resp);
                 if (r.httpMinor != "1")
                     break; //no keep-alive for v1.0
             }

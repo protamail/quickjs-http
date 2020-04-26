@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <sys/prctl.h>
 #include <stdlib.h>
+#include <netdb.h>
 
 static JSValue js_set_proc_name(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
@@ -33,6 +34,38 @@ static JSValue js_fork(JSContext *ctx, JSValueConst this_val,
 static void js_array_buffer_free(JSRuntime *rt, void *opaque, void *ptr)
 {
     js_free_rt(rt, ptr);
+}
+
+// connect to external service
+static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int32_t sockfd, ret, port;
+    if (argc < 2)
+        goto arg_fail;
+    sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
+    if (sockfd < 0)
+        goto errno_fail;
+    ret = 1;
+    if (JS_ToInt32(ctx, &port, argv[1]))
+        goto arg_fail;
+    struct sockaddr_in addr = { AF_INET, htons(port) };
+    const char *str = JS_ToCString(ctx, argv[0]);
+    ret = inet_aton(str, &addr.sin_addr);
+    JS_FreeCString(ctx, str);
+    if (!ret) {
+        JS_ThrowInternalError(ctx, "Not valid IP address");
+        goto fail;
+    }
+    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
+        goto errno_fail;
+    return JS_NewInt32(ctx, sockfd);
+errno_fail:
+    return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+arg_fail:
+    return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number");
+fail:
+    return JS_EXCEPTION;
 }
 
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
@@ -126,12 +159,31 @@ static int set_header(http_parser *p)
 
 static int set_url(http_request *r)
 {
+//    struct http_parser_url parsed_url;
+    JSValue val;
     if (r->url_len) {
-        JSValue url = JS_NewStringLen(r->ctx, r->buf, r->url_len);
-        r->url_len = 0;
-        if (JS_IsException(url))
+        val = JS_NewStringLen(r->ctx, r->buf, r->url_len);
+        if (JS_IsException(val))
             return -1;
-        JS_DefinePropertyValueStr(r->ctx, r->ret, "url", url, JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(r->ctx, r->ret, "url", val, JS_PROP_C_W_E);
+/*        http_parser_url_init(&parsed_url);
+        if (http_parser_parse_url(r->buf, r->url_len, 0, &parsed_url))
+            return -1;
+        if ((parsed_url.field_set >> UF_PATH) & 1) {
+            val = JS_NewStringLen(r->ctx, r->buf + parsed_url.field_data[UF_PATH].off,
+                    parsed_url.field_data[UF_PATH].len);
+            if (JS_IsException(val))
+                return -1;
+            JS_DefinePropertyValueStr(r->ctx, r->ret, "path", val, JS_PROP_C_W_E);
+        }
+        if ((parsed_url.field_set >> UF_QUERY) & 1) {
+            val = JS_NewStringLen(r->ctx, r->buf + parsed_url.field_data[UF_QUERY].off,
+                    parsed_url.field_data[UF_QUERY].len);
+            if (JS_IsException(val))
+                return -1;
+            JS_DefinePropertyValueStr(r->ctx, r->ret, "query", val, JS_PROP_C_W_E);
+        }*/
+        r->url_len = 0;
     }
     return 0;
 }
@@ -237,20 +289,26 @@ static JSValue recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
     if (!rcvbuf || !r.buf) //js_malloc throws out-of-memory
         goto fail;
     if (argc < 2) {
-        JS_ThrowInternalError(ctx, "Expecting sockfd, max_length_bytes");
+        JS_ThrowInternalError(ctx, "Expecting sockfd, max_bytes");
         goto fail;
     }
-    if (JS_ToInt32(ctx, &fd, argv[0]))
+    if (JS_ToInt32(ctx, &fd, argv[0])) {
+        JS_ThrowInternalError(ctx, "Expecting sockfd as number");
         goto fail;
-    if (JS_ToInt32(ctx, &r.max_size, argv[1]))
+    }
+    if (JS_ToInt32(ctx, &r.max_size, argv[1])) {
+        JS_ThrowInternalError(ctx, "Expecting max_size as number");
         goto fail;
+    }
     r.ret = JS_NewObject(ctx);
     r.js_headers = JS_NewObject(ctx);
     JS_DefinePropertyValueStr(ctx, r.ret, "h", r.js_headers, JS_PROP_C_W_E);
 
     if (argc > 2) {
-        if (JS_ToInt32(ctx, &max_header_size, argv[2]))
+        if (JS_ToInt32(ctx, &max_header_size, argv[2])) {
+            JS_ThrowInternalError(ctx, "Expecting max_header_size as number");
             goto fail;
+        }
         http_parser_set_max_header_size(max_header_size);
     }
     http_parser_settings_init(&settings);
@@ -265,7 +323,7 @@ static JSValue recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
 
     while (!r.request_complete && (c = recv(fd, rcvbuf, BUF_SIZE, 0)) >= 0) {
         r.request_bytes_read += c;
-        if (r.request_bytes_read > r.max_size) {
+        if (r.max_size > 0 && r.request_bytes_read > r.max_size) {
             JS_ThrowInternalError(ctx, "Request too large, over %d", r.max_size);
             goto fail;
         }
@@ -561,35 +619,40 @@ arg_fail:
     goto ret;
 }
 
-static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
-                        int argc, JSValueConst *argv)
+JSValue hostname_to_ip(char *hostname , char *ip)
 {
-    int32_t sockfd, ret, port;
-    if (argc < 2)
-        goto arg_fail;
-    sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
-    if (sockfd < 0)
-        goto errno_fail;
-    ret = 1;
-    if (JS_ToInt32(ctx, &port, argv[1]))
-        goto arg_fail;
-    struct sockaddr_in addr = { AF_INET, htons(port) };
-    const char *str = JS_ToCString(ctx, argv[0]);
-    ret = inet_aton(str, &addr.sin_addr);
-    JS_FreeCString(ctx, str);
-    if (!ret) {
-        JS_ThrowInternalError(ctx, "Not valid IP address");
-        goto fail;
-    }
-    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
-        goto errno_fail;
-    return JS_NewInt32(ctx, sockfd);
-errno_fail:
-    return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
-arg_fail:
-    return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number");
-fail:
-    return JS_EXCEPTION;
+	struct addrinfo hints, *res, *p;
+	int rv;
+        char buf[INET6_ADDRSTRLEN];
+
+	memset(&hints, 0, sizeof hints);
+//	hints.ai_family = AF_INET6; // use AF_INET6 to force IPv6
+	hints.ai_socktype = SOCK_STREAM;
+
+	if ( (rv = getaddrinfo( hostname , NULL , &hints , &res)) != 0) 
+	{
+            fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+            return 1;
+	}
+
+	// loop through all the results and connect to the first we can
+	for(p = res; p != NULL; p = p->ai_next) 
+	{
+            if (p->ai_addr->sa_family == AF_INET6) {
+		struct sockaddr_in6 *h = (struct sockaddr_in6 *)p->ai_addr;
+                if (inet_ntop(h->sin6_family, &h->sin6_addr, (char *__restrict)&buf, INET6_ADDRSTRLEN) != NULL)
+                printf("addr=%s\n", buf);
+            }
+            else {
+                struct sockaddr_in *h = (struct sockaddr_in *)p->ai_addr;
+                printf("addr=%s\n", inet_ntop(h->sin_family, &h->sin_addr, (char *__restrict)&buf, INET6_ADDRSTRLEN));
+                //printf("addr=%s\n", inet_ntoa( h->sin_addr ));
+		//strcpy(ip , inet_ntoa( h->sin_addr ) );
+            }
+	}
+	
+	freeaddrinfo(res); // all done with this structure
+	return 0;
 }
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
