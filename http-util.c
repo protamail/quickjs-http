@@ -109,9 +109,10 @@ static JSValue js_accept(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
     int32_t sockfd, newfd;
+    char buf[INET6_ADDRSTRLEN];
     if (argc < 1 || JS_ToInt32(ctx, &sockfd, argv[0]))
         return JS_ThrowInternalError(ctx, "Expecting sockfd");
-    struct sockaddr_in raddr;
+    struct sockaddr_in6 raddr;
     socklen_t sin_size = sizeof(raddr);
     newfd = accept(sockfd, (struct sockaddr *)&raddr, &sin_size);
     if (newfd < 0)
@@ -120,8 +121,9 @@ static JSValue js_accept(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(obj))
         return obj;
     JS_DefinePropertyValueUint32(ctx, obj, 0, JS_NewInt32(ctx, newfd), JS_PROP_C_W_E);
-    JS_DefinePropertyValueUint32(ctx, obj, 1, JS_NewString(ctx, inet_ntoa(raddr.sin_addr)), JS_PROP_C_W_E);
-    JS_DefinePropertyValueUint32(ctx, obj, 2, JS_NewInt32(ctx, ntohs(raddr.sin_port)), JS_PROP_C_W_E);
+    if (inet_ntop(AF_INET6, &raddr.sin6_addr, (char *__restrict)&buf, INET6_ADDRSTRLEN))
+        JS_DefinePropertyValueUint32(ctx, obj, 1, JS_NewString(ctx, buf), JS_PROP_C_W_E);
+    JS_DefinePropertyValueUint32(ctx, obj, 2, JS_NewInt32(ctx, ntohs(raddr.sin6_port)), JS_PROP_C_W_E);
     return obj;
 }
 

@@ -184,6 +184,7 @@ function httpWorker() {
     while(1) { //accept loop
         try {
             [connfd, remoteAddr, remotePort] = util.accept(_listenfd);
+console.log(`accepted from: ${remoteAddr}:${remotePort}`);
             signalStatus(1); //busy
             while(1) { //keep-alive loop
                 let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
