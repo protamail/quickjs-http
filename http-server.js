@@ -36,7 +36,7 @@ termSignals.forEach(s => os.signal(s, function collectWorkers() {
     shutdown();
 }));
 
-export function start({ listen = "0.0.0.0", port, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180, requestHandler }) {
+export function start({ listen = "::0", port, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180, requestHandler }) {
     if (!port)
         throw new Error("Expecting port as number");
     _listenfd = util.listen(listen, port, 10/*backlog*/);
@@ -184,13 +184,15 @@ function httpWorker() {
     while(1) { //accept loop
         try {
             [connfd, remoteAddr, remotePort] = util.accept(_listenfd);
-console.log(`accepted from: ${remoteAddr}:${remotePort}`);
+//console.log(`accepted from: ${remoteAddr}:${remotePort}`);
             signalStatus(1); //busy
             while(1) { //keep-alive loop
                 let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
                 if (!r.method || r.httpMajor != "1") //maybe conn closed or keep-alive limit reached
                     break;
-                [r.path, r.query] = r.url && r.url.split("?") || ["", ""];
+                let [path, query] = r.url && r.url.split("?");
+                r.path = path || "";
+                r.query = query || "";
                 r.originalActionPath = r.path.split("/");
                 r.originalActionPath.shift();
                 r.actionPath = r.originalActionPath;

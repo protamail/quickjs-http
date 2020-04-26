@@ -84,9 +84,9 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
         goto arg_fail;
     if (argc > 2 && JS_ToInt32(ctx, &backlog, argv[2]))
         goto arg_fail;
-    struct sockaddr_in6 addr = { AF_INET6, htons(port) };
     const char *str = JS_ToCString(ctx, argv[0]);
-    ret = inet_pton(AF_INET, str, &addr.sin6_addr);
+    struct sockaddr_in6 addr = { AF_INET6, htons(port) };
+    ret = inet_pton(AF_INET6, str, &addr.sin6_addr);
     JS_FreeCString(ctx, str);
     if (!ret) {
         JS_ThrowInternalError(ctx, "Not valid IP address");
