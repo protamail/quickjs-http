@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <netdb.h>
 
+static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in *addr4, struct sockaddr_in6 *addr6);
+
 static JSValue js_set_proc_name(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
@@ -40,59 +42,69 @@ static void js_array_buffer_free(JSRuntime *rt, void *opaque, void *ptr)
 static JSValue js_connect(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    int32_t sockfd, ret, port;
+    int32_t sockfd, port, af = 0;
+    struct sockaddr_in addr4;
+    struct sockaddr_in6 addr6;
+    const char *host;
     if (argc < 2)
         goto arg_fail;
-    sockfd = socket(AF_INET, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
-    if (sockfd < 0)
-        goto errno_fail;
-    ret = 1;
     if (JS_ToInt32(ctx, &port, argv[1]))
         goto arg_fail;
-    struct sockaddr_in addr = { AF_INET, htons(port) };
-    const char *str = JS_ToCString(ctx, argv[0]);
-    ret = inet_aton(str, &addr.sin_addr);
-    JS_FreeCString(ctx, str);
-    if (!ret) {
-        JS_ThrowInternalError(ctx, "Not valid IP address");
-        goto fail;
+    host = JS_ToCString(ctx, argv[0]);
+    if (!resolve_host(host, port, &addr4, &addr6)) {
+        if (addr4.sin_family == AF_INET)
+            af = AF_INET;
+        else if (addr6.sin6_family == AF_INET6)
+            af = AF_INET6;
     }
-    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
+    JS_FreeCString(ctx, host);
+    if (!af)
+        return JS_ThrowInternalError(ctx, "Not valid hostname or IP address");
+    sockfd = socket(af, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
+    if (sockfd < 0)
+        goto errno_fail;
+    if (af == AF_INET && connect(sockfd, (struct sockaddr *)&addr4, sizeof(addr4)))
+        goto errno_fail;
+    if (af == AF_INET6 && connect(sockfd, (struct sockaddr *)&addr6, sizeof(addr6)))
         goto errno_fail;
     return JS_NewInt32(ctx, sockfd);
 errno_fail:
     return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
 arg_fail:
     return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number");
-fail:
-    return JS_EXCEPTION;
 }
 
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    int32_t sockfd, ret, port, backlog = 10;
+    int32_t sockfd, port, backlog = 10, af = 0, ret;
+    struct sockaddr_in addr4;
+    struct sockaddr_in6 addr6;
+    const char *host;
     if (argc < 2)
         goto arg_fail;
-    sockfd = socket(AF_INET6, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
-    if (sockfd < 0)
-        goto errno_fail;
-    ret = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &ret, sizeof(ret)) < 0)
-        goto errno_fail;
     if (JS_ToInt32(ctx, &port, argv[1]))
         goto arg_fail;
     if (argc > 2 && JS_ToInt32(ctx, &backlog, argv[2]))
         goto arg_fail;
-    const char *str = JS_ToCString(ctx, argv[0]);
-    struct sockaddr_in6 addr = { AF_INET6, htons(port) };
-    ret = inet_pton(AF_INET6, str, &addr.sin6_addr);
-    JS_FreeCString(ctx, str);
-    if (!ret) {
-        JS_ThrowInternalError(ctx, "Not valid IP address");
-        goto fail;
+    host = JS_ToCString(ctx, argv[0]);
+    if (!resolve_host(host, port, &addr4, &addr6)) {
+        if (addr4.sin_family == AF_INET)
+            af = AF_INET;
+        else if (addr6.sin6_family == AF_INET6)
+            af = AF_INET6;
     }
-    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
+    JS_FreeCString(ctx, host);
+    if (!af)
+        return JS_ThrowInternalError(ctx, "Not valid hostname or IP address");
+    sockfd = socket(af, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
+    if (sockfd < 0)
+        goto errno_fail;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &ret, sizeof(ret)) < 0)
+        goto errno_fail;
+    if (af == AF_INET && bind(sockfd, (struct sockaddr *)&addr4, sizeof(addr4)))
+        goto errno_fail;
+    if (af == AF_INET6 && bind(sockfd, (struct sockaddr *)&addr6, sizeof(addr6)))
         goto errno_fail;
     if (listen(sockfd, backlog))
         goto errno_fail;
@@ -101,8 +113,6 @@ errno_fail:
     return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
 arg_fail:
     return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number, backlog_number=10(optional)");
-fail:
-    return JS_EXCEPTION;
 }
 
 static JSValue js_accept(JSContext *ctx, JSValueConst this_val,
@@ -161,30 +171,12 @@ static int set_header(http_parser *p)
 
 static int set_url(http_request *r)
 {
-//    struct http_parser_url parsed_url;
     JSValue val;
     if (r->url_len) {
         val = JS_NewStringLen(r->ctx, r->buf, r->url_len);
         if (JS_IsException(val))
             return -1;
         JS_DefinePropertyValueStr(r->ctx, r->ret, "url", val, JS_PROP_C_W_E);
-/*        http_parser_url_init(&parsed_url);
-        if (http_parser_parse_url(r->buf, r->url_len, 0, &parsed_url))
-            return -1;
-        if ((parsed_url.field_set >> UF_PATH) & 1) {
-            val = JS_NewStringLen(r->ctx, r->buf + parsed_url.field_data[UF_PATH].off,
-                    parsed_url.field_data[UF_PATH].len);
-            if (JS_IsException(val))
-                return -1;
-            JS_DefinePropertyValueStr(r->ctx, r->ret, "path", val, JS_PROP_C_W_E);
-        }
-        if ((parsed_url.field_set >> UF_QUERY) & 1) {
-            val = JS_NewStringLen(r->ctx, r->buf + parsed_url.field_data[UF_QUERY].off,
-                    parsed_url.field_data[UF_QUERY].len);
-            if (JS_IsException(val))
-                return -1;
-            JS_DefinePropertyValueStr(r->ctx, r->ret, "query", val, JS_PROP_C_W_E);
-        }*/
         r->url_len = 0;
     }
     return 0;
@@ -621,41 +613,38 @@ arg_fail:
     goto ret;
 }
 
-/*JSValue hostname_to_ip(char *hostname , char *ip)
+static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in *addr4, struct sockaddr_in6 *addr6)
 {
-	struct addrinfo hints, *res, *p;
-	int rv;
-        char buf[INET6_ADDRSTRLEN];
+    struct addrinfo hints, *ret, *cur;
+    memset(&hints, 0, sizeof(hints));
 
-	memset(&hints, 0, sizeof hints);
-//	hints.ai_family = AF_INET6; // use AF_INET6 to force IPv6
-	hints.ai_socktype = SOCK_STREAM;
-
-	if ( (rv = getaddrinfo( hostname , NULL , &hints , &res)) != 0) 
-	{
-            fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-            return 1;
-	}
-
-	// loop through all the results and connect to the first we can
-	for(p = res; p != NULL; p = p->ai_next) 
-	{
-            if (p->ai_addr->sa_family == AF_INET6) {
-		struct sockaddr_in6 *h = (struct sockaddr_in6 *)p->ai_addr;
-                if (inet_ntop(h->sin6_family, &h->sin6_addr, (char *__restrict)&buf, INET6_ADDRSTRLEN) != NULL)
-                printf("addr=%s\n", buf);
+    port = htons(port); // port in network order
+    if (inet_pton(AF_INET, name_or_ip, &addr4->sin_addr)) {
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = port;
+    } else if (inet_pton(AF_INET6, name_or_ip, &addr6->sin6_addr)) {
+        memset(addr4, 0, sizeof(*addr4));
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = port;
+    }
+    else {
+        memset(addr6, 0, sizeof(*addr6));
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(name_or_ip, NULL, &hints, &ret))
+            return -1;
+        for (cur = ret; cur; cur = cur->ai_next) {
+            if (cur->ai_addr->sa_family == AF_INET6) {
+                memcpy(addr6, cur->ai_addr, sizeof(*addr6));
+                addr4->sin_port = port;
+            } else if (cur->ai_addr->sa_family == AF_INET) {
+                addr6->sin6_port = port;
+                memcpy(addr4, cur->ai_addr, sizeof(*addr4));
             }
-            else {
-                struct sockaddr_in *h = (struct sockaddr_in *)p->ai_addr;
-                printf("addr=%s\n", inet_ntop(h->sin_family, &h->sin_addr, (char *__restrict)&buf, INET6_ADDRSTRLEN));
-                //printf("addr=%s\n", inet_ntoa( h->sin_addr ));
-		//strcpy(ip , inet_ntoa( h->sin_addr ) );
-            }
-	}
-	
-	freeaddrinfo(res); // all done with this structure
-	return 0;
-}*/
+        }
+        freeaddrinfo(ret);
+    }
+    return 0;
+}
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 

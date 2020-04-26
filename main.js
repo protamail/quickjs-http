@@ -5,8 +5,6 @@ var mainProcName = scriptArgs[0].match(/.*\/(.*)/)[1] || scriptArgs[0];
 try {
     http.setProcName(mainProcName);
     http.start({
-//        listen: "::1",
-//        listen: "fd00::94b4:83fb:dd20:1183",
         port: 1202,
         minWorkers: 2,
         maxWorkers: 20,
@@ -39,12 +37,12 @@ function simpleFetchUrl(host, port, r) {
     return resp;
 }
 
-/*
+
 http.forkRun(function() {
 try {
     http.setProcName(`${mainProcName}-forked`);
     for(let i=0;i<100000;i++) {
-        var resp = simpleFetchUrl("127.0.0.1", 1202, {
+        var resp = simpleFetchUrl("localhost", 1202, {
             url: "/rmt-alex/fmodel1?year=2020&rmtid=6JRC",
             body: "OK",
             h: {
@@ -61,6 +59,6 @@ try {
     console.log(e?.stack);
 }
     //console.log(http.see(resp));
-});*/
+});
 
 
