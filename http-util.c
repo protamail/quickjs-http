@@ -191,7 +191,7 @@ static int on_header_field(http_parser *p, const char *at, size_t len)
     if (r->value_len && set_header(p))
         return -1;
     if (r->field_len + len > BUF_SIZE) {
-        JS_ThrowInternalError(r->ctx, "Header line too large, over %d", BUF_SIZE);
+        JS_ThrowInternalError(r->ctx, "Header line too big, over %d", BUF_SIZE);
         return -1;
     }
     memcpy(r->buf + r->field_len, at, len);
@@ -207,7 +207,7 @@ static int on_header_value(http_parser *p, const char *at, size_t len)
         return 0;
     }
     if (r->field_len + r->value_len + len > BUF_SIZE) {
-        JS_ThrowInternalError(r->ctx, "Header line too large, over %d", BUF_SIZE);
+        JS_ThrowInternalError(r->ctx, "Header line too big, over %d", BUF_SIZE);
         return -1;
     }
     memcpy(r->buf + r->field_len + r->value_len, at, len);
@@ -259,7 +259,7 @@ static int on_url(http_parser *p, const char *at, size_t len)
 {
     http_request *r = p->data;
     if (r->url_len + len > BUF_SIZE) {
-        JS_ThrowInternalError(r->ctx, "URL too large, over %d", BUF_SIZE);
+        JS_ThrowInternalError(r->ctx, "URL too big, over %d", BUF_SIZE);
         return -1;
     }
     memcpy(r->buf + r->url_len, at, len);
@@ -319,7 +319,7 @@ static JSValue recv_http(int parser_type, JSContext *ctx, JSValueConst this_val,
     while (!r.request_complete && (c = recv(fd, rcvbuf, BUF_SIZE, 0)) >= 0) {
         r.request_bytes_read += c;
         if (r.max_size > 0 && r.request_bytes_read > r.max_size) {
-            JS_ThrowInternalError(ctx, "Request too large, over %d", r.max_size);
+            JS_ThrowInternalError(ctx, "Request too big, over %d", r.max_size);
             goto fail;
         }
         size_t count = http_parser_execute(&parser, &settings, rcvbuf, c);
@@ -538,42 +538,6 @@ static JSValue js_send_http_response(JSContext *ctx, JSValueConst this_val,
     return send_http(HTTP_RESPONSE, ctx, this_val, argc, argv);
 }
 
-static JSValue js_send(JSContext *ctx, JSValueConst this_val,
-                        int argc, JSValueConst *argv)
-{
-    int32_t fd, c = 0;
-    size_t slen, alen;
-    const char *sbuf, *abuf = NULL;
-    if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]))
-        goto arg_fail;
-    if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) { //check buffer valid before any send
-        abuf = (char *)JS_GetArrayBuffer(ctx, &alen, argv[2]);
-        if (!abuf) {
-            JS_FreeValue(ctx, JS_GetException(ctx)); //JS_GetArrayBuffer would drop an exception if its not, discard
-            goto arg_fail;
-        }
-    }
-    if (!JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) && (sbuf = JS_ToCStringLen(ctx, &slen, argv[1]))) {
-        c = send(fd, sbuf, slen, argc > 2? MSG_MORE|MSG_NOSIGNAL : MSG_NOSIGNAL); //MSG_MORE important! or big slowdown);
-        JS_FreeCString(ctx, sbuf);
-        if (c != slen)
-            goto send_fail;
-    }
-    if (argc > 2 && abuf) {
-        c = send(fd, abuf, alen, MSG_NOSIGNAL);
-        if (c != alen)
-            goto send_fail;
-    }
-    return JS_UNDEFINED;
-send_fail:
-    if (c < 0)
-        return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
-    else
-        return JS_ThrowInternalError(ctx, "Send failed");
-arg_fail:
-    return JS_ThrowInternalError(ctx, "Expecting sockfd, headerString, [bodyArrayBuffer]");
-}
-
 static JSValue js_to_array_buffer(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
@@ -647,6 +611,64 @@ static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in
     return 0;
 }
 
+static JSValue js_send_string(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int32_t fd, c;
+    size_t len;
+    const char *str;
+    if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsString(argv[1]))
+arg_fail:
+        return JS_ThrowInternalError(ctx, "Expecting sockfd, string");
+    str = JS_ToCStringLen(ctx, &len, argv[1]);
+    if (!str)
+        goto arg_fail;
+    c = send(fd, str, len, MSG_NOSIGNAL);
+    JS_FreeCString(ctx, str);
+    if (c != len)
+        return JS_ThrowInternalError(ctx, "Send failed");
+    return JS_UNDEFINED;
+}
+
+// recv at least one line of text
+static JSValue js_recv_line(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    const int buf_len = 128;
+    char rcvbuf[buf_len];
+    int32_t fd, max_bytes = 1000000, bytes_read = 0, c;
+    JSValue ret;
+    DynBuf dyn_buf;
+    dbuf_init(&dyn_buf);
+    if (argc < 1 || JS_ToInt32(ctx, &fd, argv[0]))
+arg_fail:
+        return JS_ThrowInternalError(ctx, "Expecting sockfd, [max_bytes]");
+    if (argc > 1 && JS_ToInt32(ctx, &max_bytes, argv[1]))
+        goto arg_fail;
+    while ((c = recv(fd, rcvbuf, buf_len, 0)) > 0) {
+        bytes_read += c;
+        if (bytes_read > max_bytes) {
+            ret = JS_ThrowInternalError(ctx, "Mesage too big, over %d", max_bytes);
+            goto done;
+        }
+        if (dbuf_put(&dyn_buf, (uint8_t *)rcvbuf, c)) {
+            ret = JS_ThrowInternalError(ctx, "Out of memory");
+            goto done;
+        }
+        if (memchr(rcvbuf, '\n', c)) {
+            ret = JS_NewStringLen(ctx, (const char *)dyn_buf.buf, dyn_buf.size);
+            goto done;
+        }
+    }
+    if (c < 0) {
+        ret = JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
+        goto done;
+    }
+done:
+    dbuf_free(&dyn_buf);
+    return ret;
+}
+
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
 static const JSCFunctionListEntry js_serverutil_funcs[] = {
@@ -658,10 +680,11 @@ static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("recvHttpResponse", 2, js_recv_http_response),
     JS_CFUNC_DEF("sendHttpRequest", 2, js_send_http_request),
     JS_CFUNC_DEF("sendHttpResponse", 2, js_send_http_response),
-    JS_CFUNC_DEF("send", 2, js_send),
     JS_CFUNC_DEF("toArrayBuffer", 1, js_to_array_buffer),
     JS_CFUNC_DEF("arrayBufferToString", 1, js_array_buffer_to_string),
     JS_CFUNC_DEF("connect", 2, js_connect),
+    JS_CFUNC_DEF("sendString", 2, js_send_string),
+    JS_CFUNC_DEF("recvLine", 2, js_recv_line),
 };
 
 static int js_serverutil_init(JSContext *ctx, JSModuleDef *m)
