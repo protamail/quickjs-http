@@ -10,6 +10,7 @@
 #include <sys/prctl.h>
 #include <stdlib.h>
 #include <netdb.h>
+#include <time.h>
 
 static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in *addr4, struct sockaddr_in6 *addr6);
 
@@ -669,6 +670,65 @@ done:
     return ret;
 }
 
+static int64_t get_time_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec;
+}
+
+static JSValue js_get_time_ns(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    return JS_NewFloat64(ctx, get_time_ns());
+}
+
+static JSValue js_get_pid(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    return JS_NewInt32(ctx, getpid());
+}
+
+typedef struct ChildStatus {
+    int32_t busy;
+    int32_t pid;
+} ChildStatus;
+
+static JSValue js_send_child_status(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int32_t fd, ret;
+    ChildStatus s;
+    if (argc < 3 || JS_ToInt32(ctx, &fd, argv[0]) || JS_ToInt32(ctx, &s.busy, argv[1]) || JS_ToInt32(ctx, &s.pid, argv[2]))
+        return JS_ThrowInternalError(ctx, "Expecting pipe_write_fd, int_status, int_pid");
+    ret = write(fd, &s, sizeof(s));
+    if (ret != sizeof(s)) {
+        fprintf(stdout, "error writing to pipe=%d by pid=%d, exiting\n", fd, s.pid);
+        exit(0); //pipe broken, exit child
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_recv_child_status(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int32_t fd;
+    ChildStatus s;
+    JSValue ret;
+    if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsObject(argv[1]))
+        return JS_ThrowInternalError(ctx, "Expecting pipe_read_fd, worker_obj");
+    if (sizeof(s) == read(fd, &s, sizeof(s))) {
+        ret = JS_GetPropertyUint32(ctx, argv[1], s.pid);
+        if (JS_IsException(ret) || !JS_IsObject(ret))
+            return JS_ThrowInternalError(ctx, "Invalid PID: %d", s.pid);
+        JS_DefinePropertyValueStr(ctx, ret, "busySinceNs", JS_NewFloat64(ctx, get_time_ns()), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, ret, "idle", JS_NewBool(ctx, !s.busy), JS_PROP_C_W_E);
+        JS_FreeValue(ctx, ret);
+    } else
+        return JS_ThrowInternalError(ctx, "Error receiving status");
+    return JS_UNDEFINED;
+}
+
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
 static const JSCFunctionListEntry js_serverutil_funcs[] = {
@@ -685,6 +745,10 @@ static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("connect", 2, js_connect),
     JS_CFUNC_DEF("sendString", 2, js_send_string),
     JS_CFUNC_DEF("recvLine", 2, js_recv_line),
+    JS_CFUNC_DEF("sendChildStatus", 3, js_send_child_status),
+    JS_CFUNC_DEF("recvChildStatus", 2, js_recv_child_status),
+    JS_CFUNC_DEF("getTimeNs", 0, js_get_time_ns),
+    JS_CFUNC_DEF("getPid", 0, js_get_pid),
 };
 
 static int js_serverutil_init(JSContext *ctx, JSModuleDef *m)

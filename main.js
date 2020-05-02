@@ -66,9 +66,9 @@ function simpleSendMail(host, port, from, to, subj, text) {
     }
 }
 
-http.forkRun(() => {
-    simpleSendMail("10.8.1.1", 587, "bot@bkmks.com", "aprotasenko@bkmks.com", "test subj", "test email");
-});
+//http.forkRun(() => {
+//    simpleSendMail("10.8.1.1", 587, "bot@bkmks.com", "aprotasenko@bkmks.com", "test subj", "test email");
+//});
 /*
 http.forkRun(function() {
     try{
