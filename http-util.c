@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <netdb.h>
 #include <time.h>
+#include <sys/ioctl.h>
+#include <signal.h>
 
 static int resolve_host(const char *name_or_ip, int32_t port, struct sockaddr_in *addr4, struct sockaddr_in6 *addr6);
 
@@ -79,7 +81,7 @@ arg_fail:
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    int32_t sockfd, port, backlog = 10, af = 0, ret;
+    int32_t sockfd, port, backlog = 10, af = 0, reuse_enable = 1;
     struct sockaddr_in addr4;
     struct sockaddr_in6 addr6;
     const char *host;
@@ -102,7 +104,7 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val,
     sockfd = socket(af, SOCK_STREAM/*|SOCK_NONBLOCK*/, 0);
     if (sockfd < 0)
         goto errno_fail;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &ret, sizeof(ret)) < 0)
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse_enable, sizeof(reuse_enable)) < 0)
         goto errno_fail;
     if (af == AF_INET && bind(sockfd, (struct sockaddr *)&addr4, sizeof(addr4)))
         goto errno_fail;
@@ -115,6 +117,17 @@ errno_fail:
     return JS_ThrowInternalError(ctx, "%d -> %s", errno, strerror(errno));
 arg_fail:
     return JS_ThrowInternalError(ctx, "Expecting ip_str, port_number, backlog_number=10(optional)");
+}
+
+static JSValue js_siginterrupt(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv)
+{
+    int sig, do_intr;
+    if (JS_ToInt32(ctx, &sig, argv[0]))
+        return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &do_intr, argv[1]))
+        return JS_EXCEPTION;
+    return JS_NewInt32(ctx, siginterrupt(sig, do_intr));
 }
 
 static JSValue js_accept(JSContext *ctx, JSValueConst this_val,
@@ -670,17 +683,26 @@ done:
     return ret;
 }
 
-static int64_t get_time_ns()
-{
+static int64_t date_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec;
+    return (uint64_t)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
+    //struct timeval tv;
+    //gettimeofday(&tv, NULL);
+    //return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
 }
 
-static JSValue js_get_time_ns(JSContext *ctx, JSValueConst this_val,
+static JSValue js_date_now_ms(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{
+    return JS_NewFloat64(ctx, date_now_ms());
+}
+
+static JSValue js_event_loop(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    return JS_NewFloat64(ctx, get_time_ns());
+    js_std_loop(ctx);
+    return JS_UNDEFINED;
 }
 
 static JSValue js_get_pid(JSContext *ctx, JSValueConst this_val,
@@ -712,20 +734,23 @@ static JSValue js_send_child_status(JSContext *ctx, JSValueConst this_val,
 static JSValue js_recv_child_status(JSContext *ctx, JSValueConst this_val,
                         int argc, JSValueConst *argv)
 {
-    int32_t fd;
+    int32_t fd, avail, c;
     ChildStatus s;
     JSValue ret;
     if (argc < 2 || JS_ToInt32(ctx, &fd, argv[0]) || !JS_IsObject(argv[1]))
         return JS_ThrowInternalError(ctx, "Expecting pipe_read_fd, worker_obj");
-    if (sizeof(s) == read(fd, &s, sizeof(s))) {
+    while ((c = read(fd, &s, sizeof(s)))) {
+        if (c != sizeof(s))
+            return JS_ThrowInternalError(ctx, "Error receiving status");
         ret = JS_GetPropertyUint32(ctx, argv[1], s.pid);
         if (JS_IsException(ret) || !JS_IsObject(ret))
             return JS_ThrowInternalError(ctx, "Invalid PID: %d", s.pid);
-        JS_DefinePropertyValueStr(ctx, ret, "busySinceNs", JS_NewFloat64(ctx, get_time_ns()), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, ret, "busySince", JS_NewFloat64(ctx, date_now_ms()), JS_PROP_C_W_E);
         JS_DefinePropertyValueStr(ctx, ret, "idle", JS_NewBool(ctx, !s.busy), JS_PROP_C_W_E);
         JS_FreeValue(ctx, ret);
-    } else
-        return JS_ThrowInternalError(ctx, "Error receiving status");
+        if (!(ioctl(fd, FIONREAD, &avail) >= 0 && avail)) //check if there's no more msgs to read
+            break;
+    }
     return JS_UNDEFINED;
 }
 
@@ -734,6 +759,7 @@ static JSValue js_recv_child_status(JSContext *ctx, JSValueConst this_val,
 static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("setProcName", 1, js_set_proc_name),
     JS_CFUNC_DEF("fork", 0, js_fork),
+    JS_CFUNC_DEF("siginterrupt", 2, js_siginterrupt),
     JS_CFUNC_DEF("listen", 2, js_listen),
     JS_CFUNC_DEF("accept", 1, js_accept),
     JS_CFUNC_DEF("recvHttpRequest", 2, js_recv_http_request),
@@ -747,8 +773,9 @@ static const JSCFunctionListEntry js_serverutil_funcs[] = {
     JS_CFUNC_DEF("recvLine", 2, js_recv_line),
     JS_CFUNC_DEF("sendChildStatus", 3, js_send_child_status),
     JS_CFUNC_DEF("recvChildStatus", 2, js_recv_child_status),
-    JS_CFUNC_DEF("getTimeNs", 0, js_get_time_ns),
+    JS_CFUNC_DEF("dateNowMs", 0, js_date_now_ms),
     JS_CFUNC_DEF("getPid", 0, js_get_pid),
+    JS_CFUNC_DEF("jsEventLoop", 0, js_event_loop),
 };
 
 static int js_serverutil_init(JSContext *ctx, JSModuleDef *m)
