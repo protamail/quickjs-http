@@ -21,14 +21,18 @@ try {
 
 function handleRequest(r) {
 //    console.log(http.see(r));
-    let resp = {
+    return {
+        status: 302,
         h: {
-            "Host": "localhost",
+            Host: "localhost",
             "Content-Type": "text/plain; charset=utf-8",
+            Location: "https://meet.jit.si/protasenko",
         },
-        body: "OKk",
+        postprocess: () => {
+            simpleSendMail("10.8.1.1", 587, "redirect-notify@bkmks.com", "aprotasenko@bkmks.com",
+                `jitsi visited from ${r.h["X-Real-IP"]}`, "Посетители в: https://meet.jit.si/protasenko");
+        }
     };
-    return resp;
 }
 
 function simpleFetchUrl(host, port, r) {
@@ -46,7 +50,7 @@ function simpleSendMail(host, port, from, to, subj, text) {
     assertResp("250 ", `mail from: ${from}\n`);
     assertResp("250 ", `rcpt to: ${to}\n`);
     assertResp("354 ", "data\n");
-    assertResp("250 ", `Subject: ${subj}\r\n\r\n${text}\r\n.\r\n`)
+    assertResp("250 ", `Subject: ${subj}\nFrom: ${from}\nTo: ${to}\nContent-Type: text/plain; charset=utf-8;\n\n${text}\r\n.\r\n`)
     http.sendString(conn, "quit\n");
     http.close(conn);
 
@@ -65,58 +69,5 @@ function simpleSendMail(host, port, from, to, subj, text) {
         }
     }
 }
-
-http.forkRun(() => {
-    simpleSendMail("10.8.1.1", 587, "bot@bkmks.com", "aprotasenko@bkmks.com", "test subj", "test email");
-});
-/*
-http.forkRun(function() {
-    try{
-    var _listenfd = http.listen("localhost", 1234);
-        let [conn, remoteAddr, remotePort] = http.accept(_listenfd);
-while(1){
-    http.recvLine(conn);
-    http.sendString(conn, "two linedsfsdklfjsdlkfjlskdjf;saf;ksjdhfg;dfgh;sdfhg;kjdsfhgkj;dhsfgkjdfhsklhjgkldsjfhgkdsjhfglksdjfhglkdsjhfglkdsjhfgkldsjhfgkldjshfglkjsdhgfkldshfglkjdshfglkdjsfhglkdjsfhglkdsfhglkdsfhgkldsjfhjglkdsfjhglkdsfhglksdfhglkdsfhjfgklsdjhfgdlkshgflkdshjfglksdjhfglksjhdfgklshjdfkjg\n");
-}
-} catch (e){
-    console.log(e);
-    console.log(e?.stack);
-}
-});
-http.forkRun(function() {
-    try{
-    var conn = http.connect("localhost", 1234);
-while(1){
-    http.sendString(conn, "one line dkfhskdjhflkasdhflkdjshaflkjasdhflkjhsdakjfhiluawehfwuhfasdljkhfklsjdahfkljasdhfkljsdahfkljsadhfklasdhflkjhsdklfjhsdlakjfhlsakdfjhlskajdhflksdhgfkshgikusdfhguksdhfgkjsdhaflkwehlrkjhwelkafhasdlkfhsdlkjflksdgfljhsdgfljkhsdgajhg\n");
-    http.recvLine(conn);
-}
-} catch (e){
-    console.log(e);
-    console.log(e?.stack);
-}
-});*/
-/*
-http.forkRun(function() {
-try {
-    http.setProcName(`${mainProcName}-forked`);
-    for(let i=0;i<100000;i++) {
-        var resp = simpleFetchUrl("::1", 1202, {
-            url: "/rmt-alex/fmodel1?year=2020&rmtid=6JRC",
-            body: "OK",
-            h: {
-                Host: "localhost"
-            }
-        });
-//        console.log(http.see(resp));
-        if (i && !(i%10000))
-            console.log(i);
-    }
-    console.log("done");
-} catch (e){
-    console.log(e);
-    console.log(e?.stack);
-}
-    //console.log(http.see(resp));
-});*/
 
 

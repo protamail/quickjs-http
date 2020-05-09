@@ -196,9 +196,10 @@ function httpWorker() {
         try {
             [connfd, remoteAddr, remotePort] = util.accept(_listenfd);
 //console.log(`accepted from: ${remoteAddr}:${remotePort}`);
-            signalStatus(1); //busy
             while(1) { //keep-alive loop
+                signalStatus(0); //idle/keepalive
                 let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
+                signalStatus(1); //busy
                 if (!r.method || r.httpMajor != "1") //maybe conn closed or keep-alive limit reached
                     break;
                 let [path, query] = r.url && r.url.split("?");
@@ -207,6 +208,7 @@ function httpWorker() {
                 r.originalActionPath = r.path.split("/");
                 r.originalActionPath.shift();
                 r.actionPath = r.originalActionPath;
+                r.remoteAddr = remoteAddr;
                 let o = r.p = {};
                 for (let kv of r.query.split("&")) {
                     let [k, v] = kv.split("=");
@@ -219,6 +221,8 @@ function httpWorker() {
                 if (!resp.status)
                     resp.status = 200;
                 util.sendHttpResponse(connfd, resp);
+                if (resp.postprocess)
+                    resp.postprocess(r);
                 if (r.httpMinor != "1")
                     break; //no keep-alive for v1.0
             }
