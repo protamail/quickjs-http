@@ -1,5 +1,4 @@
 OBJDIR=.obj
-LIBDIR=lib
 
 CC=gcc
 #-flto 
@@ -8,7 +7,7 @@ CFLAGS += -Wno-array-bounds -Wno-format-truncation
 AR=gcc-ar
 STRIP=strip
 LDFLAGS=-g
-SHLIB=lib/libhttputil.so
+SHLIB=libhttputil.so
 
 PROGS=$(SHLIB)
 
@@ -21,10 +20,7 @@ LIBS=-lm -ldl -lrt
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
-$(LIBDIR):
-	mkdir -p $(LIBDIR)
-
-$(SHLIB): $(OBJDIR) $(LIB_OBJS) $(LIBDIR)
+$(SHLIB): $(OBJDIR) $(LIB_OBJS)
 	$(CC) $(LDFLAGS) -shared -o $@ $(LIB_OBJS) $(LIBS)
 #	$(STRIP) $@
 

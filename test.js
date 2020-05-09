@@ -6,11 +6,11 @@ var mainProcName = scriptArgs[0].match(/.*\/(.*)/)[1] || scriptArgs[0];
 try {
     http.setProcName(mainProcName);
     http.start({
-        listen: "::0",
+        listen: "localhost",
         port: 1202,
-        minWorkers: 2,
+        minWorkers: 1,
         maxWorkers: 20,
-        workerTimeoutSec: 600,
+        workerTimeoutSec: 300,
         requestHandler: handleRequest,
     });
 } catch (e) {

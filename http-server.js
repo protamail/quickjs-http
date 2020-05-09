@@ -1,78 +1,85 @@
-import * as util from "./lib/libhttputil.so";
+import * as util from "./libhttputil.so";
 import * as os from "os";
 import * as std from "std";
 import { see } from "./see.js";
 export * from "./see.js";
-export * from "./lib/libhttputil.so";
+export * from "./libhttputil.so";
 export { close } from "os";
 
-const MAX_REQUEST_SIZE = 20000000;
-var _buf = new ArrayBuffer(4);
-var _intBuf = new Uint32Array(_buf);
+var _maxRequestSize;
 var _workers = {};
-var _listenfd, _minWorkers, _maxWorkers, _timeoutSec;
-var _workerProcess = 0, _statusWriteFd, _procLimitTimer, _requestHandler;
-var _allChildren = {}, _shuttingDown = false;
+var _listenfd, _minWorkers, _maxWorkers, _timeoutMs;
+var _workerProcess = 0, _procLimitTimer, _requestHandler;
+var _statusReadFd, _statusWriteFd;
+var _allChildren = {}, _shuttingDown = false, _ownPid = 0, _enforcerIntervalMs = 2000;
 
 os.signal(os.SIGPIPE, function() {
-    console.log(`Received SIGPIPE`);
+    console.log(`${getDateTime()} Received SIGPIPE`);
 });
 
 os.signal(os.SIGCHLD, function() {
     let pid;
     while ((pid = os.waitpid(-1, os.WNOHANG)[0]) > 0) {
         //dont try to restart anything here because we could be shutting down
-        let workerKey = makeChildKey(pid);
-        if (workerKey in _workers) {
-            os.setReadHandler(_workers[workerKey].statusReadFd, null);
-            os.close(_workers[workerKey].statusReadFd);
-            delete _workers[workerKey];
-        }
-        if (workerKey in _allChildren) {
-            _allChildren[workerKey].resolve(pid);
-            delete _allChildren[workerKey];
-        }
+        delete _workers[pid];
+        _allChildren[pid] && _allChildren[pid].resolve(pid);
+        delete _allChildren[pid];
     }
 });
 
-function makeChildKey(pid) {
-    return `w${pid}`;
-}
-
 const termSignals = [os.SIGQUIT, os.SIGTERM, os.SIGINT, os.SIGABRT];
 const SIGKILL = 9;
-termSignals.forEach(s => os.signal(s, function collectWorkers() {
-    console.log(`Received signal ${s}`);
+termSignals.forEach(s => os.signal(s, function() {
+    console.log(`${getDateTime()} Received signal ${s}`);
     shutdown();
 }));
 
 export function shutdown() {
-    console.log("Shutting down.");
+    console.log(`${getDateTime()} Shutting down.`);
     _shuttingDown = true; //stop scheduleProcLimiter from re-spawning
-    for (let workerKey in _allChildren) {
-        //long running workers are supposed to be spawned by master process only,
-        //workers don't need to cleanup their children, so can be SIGKILLed
-        os.kill(_allChildren[workerKey].pid, os.SIGINT);
-    }
-    Promise.all(Object.values(_allChildren).map(c => c.promise))
-        .then(_ => std.exit(0))
+    if (_procLimitTimer)
+        os.clearTimeout(_procLimitTimer);
+    Promise.all(Object.values(_allChildren).map(c => {
+        os.kill(c.pid, SIGKILL); //make sure we kill even spinning/etc
+        return c.promise;
+    })).then(_ => {
+        os.setReadHandler(_statusReadFd, null);
+        os.close(_statusReadFd);
+        os.close(_statusWriteFd);
+        os.close(_listenfd);
+        std.exit(0);
+    });
+}
+
+function getDateTime() {
+    let d = new Date();
+    return std.sprintf("%d-%02d-%02d %02d:%02d:%02d",
+        d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds());
 }
 
 export function start({ listen = "localhost", port, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180,
-        requestHandler }) {
+        requestHandler, maxRequestSize = 20000000 }) {
     if (!port)
         throw new Error("Expecting port as number");
     _listenfd = util.listen(listen, port, 10/*backlog*/);
-    [_minWorkers, _maxWorkers, _timeoutSec, _requestHandler] = [minWorkers, maxWorkers, workerTimeoutSec, requestHandler];
+    [_minWorkers, _maxWorkers, _timeoutMs, _requestHandler, _maxRequestSize] =
+        [minWorkers, maxWorkers, workerTimeoutSec, requestHandler, maxRequestSize];
     if (!Number.isInteger(_minWorkers) || !Number.isInteger(_maxWorkers) ||
-        !Number.isInteger(_timeoutSec))
+        !Number.isInteger(_timeoutMs))
         throw new Error("Expecting minWorkers, maxWorkers, timeoutSec as integer");
+    _timeoutMs = _timeoutMs * 1000;
     if (_maxWorkers < _minWorkers || _minWorkers > 100)
         throw new Error("Expecting maxWorkers < minWorkers and minWorkers < 100");
     if (!_requestHandler || typeof(_requestHandler) !== "function")
         throw new Error("Expecting requestHandler as function");
+    [_statusReadFd, _statusWriteFd] = os.pipe();
+    os.setReadHandler(_statusReadFd, () => {
+        util.recvChildStatus(_statusReadFd, _workers);
+//        for(var w of Object.values(_workers))
+//            console.log(`pid=${w.pid}, idle=${w.idle}`);
+    });
     enforceWorkerLimits();
-    console.log(`Now serving at http://${listen}:${port}`);
+    console.log(`${getDateTime()} Now serving at http://${listen}:${port}`);
     if (_procLimitTimer)
         os.clearTimeout(_procLimitTimer);
     scheduleProcLimiter();
@@ -84,22 +91,27 @@ function scheduleProcLimiter() {
             enforceWorkerLimits();
             scheduleProcLimiter();
         }
-    }, 2000);
+    }, _enforcerIntervalMs);
 }
 
 function enforceWorkerLimits() { //only parent process should return from here
-    let workerKeys = Object.keys(_workers);
-    let workerCount = workerKeys.length;
+    let workers = Object.values(_workers);
+    let workerCount = workers.length;
     let idleCount = 0;
-    let curMs = new Date().getTime();
     let maxIdleOverMin = Math.max(_minWorkers/3, 3);
-    for (let workerKey of workerKeys) { //remove timed out
-        let worker = _workers[workerKey];
-        if (!worker.idle && (curMs - worker.busySince)/1000 > _timeoutSec) {
-            os.kill(worker.pid, SIGKILL);
-            workerCount--;
-        }
-        if (worker.idle)
+    for (let worker of workers) { //remove timed out
+        if (!worker.idle) {
+            if ((util.dateNowMs() - worker.busySince) > _timeoutMs) {
+                let overMs = util.dateNowMs() - worker.busySince - _timeoutMs;
+                workerCount--;
+                if (overMs > _enforcerIntervalMs * 2)
+                    os.kill(worker.pid, SIGKILL);
+                else if (overMs > 0)
+                    os.kill(worker.pid, os.SIGINT);
+                else
+                    workerCount++;
+            }
+        } else
             idleCount++;
     }
     while (workerCount < _minWorkers) { //ensure min workers
@@ -112,8 +124,7 @@ function enforceWorkerLimits() { //only parent process should return from here
         workerCount++;
         idleCount++;
     } else if (workerCount > _minWorkers && idleCount > maxIdleOverMin) { //remove extra idles
-        for (let workerKey of workerKeys) {
-            let worker = _workers[workerKey];
+        for (let worker of workers) {
             if (worker.idle && workerCount > _minWorkers && idleCount > maxIdleOverMin) {
                 os.kill(worker.pid, os.SIGINT);
                 workerCount--;
@@ -126,31 +137,15 @@ function enforceWorkerLimits() { //only parent process should return from here
 function newWorker() {
     if (_workerProcess)
         return;
-    let statusReadFd;
-    [statusReadFd, _statusWriteFd] = os.pipe();
     let waitpid = forkRun(function() {
-        os.close(statusReadFd);
+        os.close(_statusReadFd);
+        _ownPid = util.getPid();
         httpWorker();
     });
-    let workerKey = makeChildKey(waitpid.pid);
-    os.close(_statusWriteFd);
-    _workers[workerKey] = {
+    _workers[waitpid.pid] = {
         pid: waitpid.pid,
-        statusReadFd: statusReadFd,
-        idle: 1,
+        idle: true,
     };
-    os.setReadHandler(statusReadFd, () => {
-        let c = os.read(statusReadFd, _buf, 0, 4);
-        let worker = _workers[workerKey];
-        if (c <= 0 || c != 4 || !worker) {
-            os.setReadHandler(statusReadFd, null); //child exited
-        } else {
-            worker.idle = !_intBuf[0];
-            if (!worker.idle)
-                worker.busySince = new Date().getTime();
-            //console.log(worker.idle? "idle" : "busy");
-        }
-    });
 }
 
 export function forkRun(func) {
@@ -160,28 +155,36 @@ export function forkRun(func) {
         throw new Error("fork failed");
     if (pid == 0) { //child
         try {
-            //do child cleanup
-            for (let workerKey in _workers) {
-                os.setReadHandler(_workers[workerKey].statusReadFd, null);
-                os.close(_workers[workerKey].statusReadFd);
-                delete _workers[workerKey];
-            }
+            //do child cleanup, important or jsEventLoop will block
+            os.setReadHandler(_statusReadFd, null);
+            _workers = {};
             if (_procLimitTimer)
                 os.clearTimeout(_procLimitTimer);
-            termSignals.forEach(s => os.signal(s, null));
+            termSignals.forEach(s => {
+                //let these signals interrupt blocking calls (EINT), e.g. accept/read/etc,
+                //so we can do some house keeping (call async callbacks) or cleanup before exit
+                util.siginterrupt(s, 1);
+                os.signal(s, function() {
+                    std.exit(0);
+                });
+            });
+            //end cleanup
+
             //do the work
             func();
         } catch (e) {
-            console.log(e);
-            console.log(e?.stack || "");
+            let dateTime = getDateTime();
+            console.log(`${dateTime} ${e}`);
+            console.log((e?.stack || "").replace(/^/mg, dateTime));
         } finally {
+            util.jsEventLoop(); //process any pending async callbacks
             std.exit(0); //child is complete
         }
     }
-    //parent process only past this point
+    //only parent process past this point
     let resolveFunc;
     let promise = new Promise(resolve => (resolveFunc = resolve)); //subclassing promise doesn't work that well
-    _allChildren[makeChildKey(pid)] = {
+    _allChildren[pid] = {
         resolve: resolveFunc,
         promise: promise,
         pid: pid,
@@ -195,11 +198,10 @@ function httpWorker() {
     while(1) { //accept loop
         try {
             [connfd, remoteAddr, remotePort] = util.accept(_listenfd);
-//console.log(`accepted from: ${remoteAddr}:${remotePort}`);
             while(1) { //keep-alive loop
-                signalStatus(0); //idle/keepalive
-                let r = util.recvHttpRequest(connfd, MAX_REQUEST_SIZE);
-                signalStatus(1); //busy
+                util.sendChildStatus(_statusWriteFd, 1, _ownPid); //busy, resets worker timeout timer
+                let r = util.recvHttpRequest(connfd, _maxRequestSize);
+                util.sendChildStatus(_statusWriteFd, 1, _ownPid); //reset worker timeout timer (recv could block e.g. keepalive)
                 if (!r.method || r.httpMajor != "1") //maybe conn closed or keep-alive limit reached
                     break;
                 let [path, query] = r.url && r.url.split("?");
@@ -227,21 +229,18 @@ function httpWorker() {
                     break; //no keep-alive for v1.0
             }
         } catch(e) {
-            console.log(e);
-            console.log(e?.stack || "");
+            if (e.message && e.message.indexOf("4 ->") == 0) {
+                //suppress EINT errno message
+            } else {
+                let dateTime = getDateTime();
+                console.log(`${dateTime} ${e}`);
+                console.log((e?.stack || "").replace(/^/mg, dateTime));
+            }
         }
         finally {
-            if (connfd)
-                os.close(connfd);
-            signalStatus(0); //idle
-        }
-    }
-
-    function signalStatus(s) {
-        _intBuf[0] = s? 1 : 0;
-        let c = os.write(_statusWriteFd, _buf, 0, 4);
-        if (c != 4) {
-            std.exit(0); //parent exited
+            os.close(connfd);
+            util.sendChildStatus(_statusWriteFd, 0, _ownPid); //idle
+            util.jsEventLoop(); //process any pending signals before accepting new connections
         }
     }
 }
