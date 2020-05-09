@@ -1,9 +1,9 @@
-import * as util from "./lib/libhttputil.so";
+import * as util from "./libhttputil.so";
 import * as os from "os";
 import * as std from "std";
 import { see } from "./see.js";
 export * from "./see.js";
-export * from "./lib/libhttputil.so";
+export * from "./libhttputil.so";
 export { close } from "os";
 
 var _maxRequestSize;
@@ -14,7 +14,7 @@ var _statusReadFd, _statusWriteFd;
 var _allChildren = {}, _shuttingDown = false, _ownPid = 0, _enforcerIntervalMs = 2000;
 
 os.signal(os.SIGPIPE, function() {
-    console.log(`Received SIGPIPE`);
+    console.log(`${getDateTime()} Received SIGPIPE`);
 });
 
 os.signal(os.SIGCHLD, function() {
@@ -30,12 +30,12 @@ os.signal(os.SIGCHLD, function() {
 const termSignals = [os.SIGQUIT, os.SIGTERM, os.SIGINT, os.SIGABRT];
 const SIGKILL = 9;
 termSignals.forEach(s => os.signal(s, function() {
-    console.log(`Received signal ${s}`);
+    console.log(`${getDateTime()} Received signal ${s}`);
     shutdown();
 }));
 
 export function shutdown() {
-    console.log("Shutting down.");
+    console.log(`${getDateTime()} Shutting down.`);
     _shuttingDown = true; //stop scheduleProcLimiter from re-spawning
     if (_procLimitTimer)
         os.clearTimeout(_procLimitTimer);
@@ -49,6 +49,12 @@ export function shutdown() {
         os.close(_listenfd);
         std.exit(0);
     });
+}
+
+function getDateTime() {
+    let d = new Date();
+    return std.sprintf("%d-%02d-%02d %02d:%02d:%02d",
+        d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds());
 }
 
 export function start({ listen = "localhost", port, minWorkers = 1, maxWorkers = 10, workerTimeoutSec = 180,
@@ -73,7 +79,7 @@ export function start({ listen = "localhost", port, minWorkers = 1, maxWorkers =
 //            console.log(`pid=${w.pid}, idle=${w.idle}`);
     });
     enforceWorkerLimits();
-    console.log(`Now serving at http://${listen}:${port}`);
+    console.log(`${getDateTime()} Now serving at http://${listen}:${port}`);
     if (_procLimitTimer)
         os.clearTimeout(_procLimitTimer);
     scheduleProcLimiter();
@@ -149,7 +155,7 @@ export function forkRun(func) {
         throw new Error("fork failed");
     if (pid == 0) { //child
         try {
-            //do child cleanup
+            //do child cleanup, important or jsEventLoop will block
             os.setReadHandler(_statusReadFd, null);
             _workers = {};
             if (_procLimitTimer)
@@ -162,12 +168,14 @@ export function forkRun(func) {
                     std.exit(0);
                 });
             });
+            //end cleanup
 
             //do the work
             func();
         } catch (e) {
-            console.log(e);
-            console.log(e?.stack || "");
+            let dateTime = getDateTime();
+            console.log(`${dateTime} ${e}`);
+            console.log((e?.stack || "").replace(/^/mg, dateTime));
         } finally {
             util.jsEventLoop(); //process any pending async callbacks
             std.exit(0); //child is complete
@@ -221,14 +229,15 @@ function httpWorker() {
             if (e.message && e.message.indexOf("4 ->") == 0) {
                 //suppress EINT errno message
             } else {
-                console.log(e);
-                console.log(e?.stack || "");
+                let dateTime = getDateTime();
+                console.log(`${dateTime} ${e}`);
+                console.log((e?.stack || "").replace(/^/mg, dateTime));
             }
         }
         finally {
             os.close(connfd);
             util.sendChildStatus(_statusWriteFd, 0, _ownPid); //idle
-            util.jsEventLoop(); //process any pending signals
+            util.jsEventLoop(); //process any pending signals before accepting new connections
         }
     }
 }
